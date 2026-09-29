@@ -1,0 +1,10 @@
+[package]
+name = "openmeeter-backend"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+log = "0.4.34"
+rtrb = "0.4.0"
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
