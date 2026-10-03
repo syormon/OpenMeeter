@@ -8,6 +8,7 @@
 pub mod engine;
 mod mock;
 mod player;
+mod resample;
 
 pub use mock::MockBackend;
 pub use player::{ENGINE_CHANNELS, ENGINE_SAMPLE_RATE, PLAYER_KEY, Player, RecordingStream};
@@ -96,6 +97,8 @@ pub struct Capabilities {
     pub create_virtual_devices: bool,
     /// Backend can move individual application streams between devices.
     pub per_app_routing: bool,
+    /// Outputs can be opened exclusively (see [`GraphNode::exclusive`]).
+    pub exclusive_mode: bool,
 }
 
 /// One endpoint of the mixer: an input strip (source) or an output bus (sink).
@@ -115,6 +118,9 @@ pub struct GraphNode {
     pub reverse: bool,
     /// Output delay in milliseconds, e.g. to line speakers up with a stream.
     pub delay_ms: f32,
+    /// Sinks only: open the device exclusively, bypassing the OS mixer (Windows
+    /// WASAPI exclusive mode). Ignored by backends without [`Capabilities::exclusive_mode`].
+    pub exclusive: bool,
 }
 
 /// A device the backend creates for a virtual strip or bus.
@@ -135,6 +141,8 @@ pub struct StreamInfo {
     pub bits: u16,
     /// Stream buffer size in engine frames.
     pub buffer_frames: u32,
+    /// The stream bypasses the OS mixer (Windows exclusive mode).
+    pub exclusive: bool,
 }
 
 /// The complete desired routing state. Backends reconcile towards it.

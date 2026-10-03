@@ -85,3 +85,23 @@ pub fn record(mut backend: Box<dyn AudioBackend>, config: &Config, seconds: u64,
     println!("{}", recorder.display(settings).detail);
     Ok(())
 }
+
+pub fn apps() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        let mut sessions = openmeeter_windows::app_sessions()?;
+        sessions.sort_by(|a, b| (&a.device, !a.active, &a.process).cmp(&(&b.device, !b.active, &b.process)));
+        let mut device = None;
+        for s in &sessions {
+            if device != Some(&s.device) {
+                println!("{}:", s.device);
+                device = Some(&s.device);
+            }
+            let state = if s.active { "playing" } else { "idle" };
+            println!("  {:<8} {} (pid {})", state, s.process, s.pid);
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    anyhow::bail!("`apps` is only available on Windows for now")
+}

@@ -94,7 +94,7 @@ pub fn parse_spec(spec: &str) -> Option<StreamInfo> {
         f if f.starts_with("s24") => 24,
         _ => 32,
     };
-    Some(StreamInfo { sample_rate, channels, bits, buffer_frames: 0 })
+    Some(StreamInfo { sample_rate, channels, bits, buffer_frames: 0, exclusive: false })
 }
 
 /// Every sink (playback) and source (capture) except our own, plus each one's

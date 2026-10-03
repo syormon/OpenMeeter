@@ -141,6 +141,8 @@ pub struct SystemInfo<'a> {
     pub streams: &'a HashMap<String, StreamInfo>,
     pub errors: &'a HashMap<String, String>,
     pub config_path: &'a str,
+    /// The backend can open outputs exclusively (Windows).
+    pub exclusive_mode: bool,
 }
 
 const DEFAULT_BUFFER_MS: u32 = 20;
@@ -221,11 +223,16 @@ pub fn system_settings(ctx: &egui::Context, open: &mut bool, settings: &mut AppS
 
                 ui.vertical(|ui| {
                     ui.label(RichText::new("Monitoring Synchro Delay:").color(theme::TEXT_DIM));
-                    egui::Grid::new("delays").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                    egui::Grid::new("delays").num_columns(3).spacing([8.0, 6.0]).show(ui, |ui| {
                         for bus in mixer.buses.iter_mut().filter(|b| b.kind == Kind::Hardware) {
                             ui.label(RichText::new(format!("OUT {}:", bus.key)).color(theme::TEXT_DIM));
                             let drag = egui::DragValue::new(&mut bus.delay_ms).range(0.0..=MAX_BUS_DELAY_MS).speed(0.5).fixed_decimals(2).suffix(" ms");
                             ui.add(drag).on_hover_text("Delays this output, e.g. to line your speakers up with a stream or video.");
+                            if info.exclusive_mode {
+                                ui.checkbox(&mut bus.exclusive, "Exclusive").on_hover_text(
+                                    "Open this output in exclusive mode, like Voicemeeter: audio skips the Windows mixer, volume and sound effects, with lower latency. Other apps can't play to the device meanwhile. Changing it briefly restarts audio.",
+                                );
+                            }
                             ui.end_row();
                         }
                     });
@@ -269,6 +276,7 @@ fn device_row(ui: &mut Ui, title: &str, key: &str, device: &Option<DeviceId>, in
             key_value(ui, 40.0, "r:", &fmt(stream.map(|s| s.bits.to_string())), value);
         });
         let line = match device_name {
+            Some(name) if stream.is_some_and(|s| s.exclusive) => RichText::new(format!("WASAPI exclusive: {name}")).color(theme::TEXT),
             Some(name) => RichText::new(format!("WASAPI: {name}")).color(theme::TEXT),
             None => RichText::new("- none -").color(theme::TEXT_FAINT),
         };

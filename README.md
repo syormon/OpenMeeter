@@ -10,6 +10,8 @@ A Voicemeeter-style audio mixer for Windows and Linux. Windows requires `VB-Cabl
       auto-stop; play WAV/MP3/FLAC/OGG/M4A into buses with gain, loop and play-on-load
 - [x] Menu: restart / auto-restart engine, presets (load, save, load on startup), reset, system tray,
       run on startup, start hidden, always on top, lock UI, system settings (buffer size, strip names)
+- [x] Windows: per-output exclusive mode (bypasses the Windows mixer and effects, like Voicemeeter)
+- [x] Windows: outputs play in raw mode, bypassing device effects (Realtek "enhancements", virtual surround, loudness) without taking the device exclusively
 - [ ] MIDI mapping, global shortcut keys, VBAN
 - [x] Linux backend: device enumeration, virtual inputs/buses created on demand, mixing engine,
       meters, recorder and player, feedback guard, unplug detection, real-time audio threads, tray icon
@@ -37,6 +39,7 @@ You will need some virtual audio drivers. If you're looking for a free version:
 > If you're wanting more than 2 audio channels, you can pay a small fee for either. Signing audio drivers on Windows is actually mad expensive, which is why it is not possible to create a free/FOSS version.
 
 Install both cables. They should show as sound drivers like so:
+
 ![VAC](./images/vac-driver.png)
 ![VB-Cable](./images/vbcable-driver.png)
 

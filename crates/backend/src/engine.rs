@@ -7,9 +7,9 @@
 //! converts, so no sample-rate conversion happens here.
 //!
 //! Devices never share a clock exactly, so each sink keeps every ring near
-//! [`Params::target_frames`]: when the smoothed fill level leaves the tolerance band it
-//! reads one frame more or less than it plays, stretching or squeezing the last
-//! `SLIP_WINDOW` frames of the block to hide the seam.
+//! [`Params::target_frames`] by resampling each source at a rate a few ppm off 1.0,
+//! steered by the smoothed fill level (see [`crate::resample`]). No sample is ever
+//! dropped or repeated, which would be audible as grain on bright material.
 //!
 //! Gains, mutes and routes live in [`Params`] as atomics, so changing them never
 //! restarts a stream. Device access is the platform's job, through [`DeviceIo`].
@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
+use crate::resample::DriftResampler;
 use crate::{BackendError, ENGINE_CHANNELS, ENGINE_SAMPLE_RATE, GraphNode, Levels, PLAYER_KEY, Player, RecordingStream, Result, RoutingGraph, StreamInfo};
 
 pub const SAMPLE_RATE: usize = ENGINE_SAMPLE_RATE as usize;
@@ -40,8 +41,13 @@ const WARMUP_SMOOTHING: f32 = 0.2;
 const WARMUP_FRAMES: usize = SAMPLE_RATE;
 /// Most snaps per warm-up, so bursty-but-steady delivery can't keep triggering them.
 const WARMUP_MAX_SNAPS: u8 = 3;
-/// Frames over which a one-frame correction is spread.
-const SLIP_WINDOW: usize = 64;
+/// Rate correction per frame of fill error. With the fill smoothing this settles
+/// in about ten seconds; typical clock drift (under 100 ppm) then holds the fill
+/// within 50 frames of the target.
+const DRIFT_GAIN: f64 = 2e-6;
+/// Largest rate correction (2000 ppm, about 3.5 cents: far beyond real clock
+/// drift, so hitting it means the source is bursty rather than drifting).
+const MAX_DRIFT: f64 = 2e-3;
 /// Backlog beyond the target (130 ms) that is dropped outright, e.g. audio queued
 /// before the sink started.
 const EMERGENCY_EXTRA_FRAMES: usize = 6240;
@@ -73,6 +79,8 @@ pub struct NodeParams {
     mute: AtomicBool,
     mono: AtomicBool,
     reverse: AtomicBool,
+    /// Sinks only: open the device exclusively. Fixed per engine run.
+    exclusive: AtomicBool,
     /// Sinks only: output delay in frames (applied after the recording tap).
     delay_frames: AtomicU32,
     /// The device stream, while it runs. Only touched at start/stop and by the UI.
@@ -83,8 +91,8 @@ pub struct NodeParams {
     /// Sinks only: times a source ran dry, and frames discarded to correct drift.
     pub underruns: AtomicU64,
     pub dropped_frames: AtomicU64,
-    /// Sinks only: one-frame drift corrections applied.
-    pub slips: AtomicU64,
+    /// Sinks only: the largest rate correction currently applied to a source, in ppm.
+    drift_ppm: AtomicF32,
     /// Why this node's stream failed to start or stopped (e.g. unplugged).
     /// Only touched on failure and by the UI, never in the audio path.
     error: Mutex<Option<String>>,
@@ -305,6 +313,16 @@ struct SourceReader {
     warmup_frames: usize,
     /// Snaps left in this warm-up.
     warmup_snaps: u8,
+    resampler: DriftResampler,
+    /// Fed by a device with its own clock. The file player isn't: it tops the ring
+    /// up on demand, so it's played as-is with no drift correction or backlog skipping.
+    clocked: bool,
+}
+
+impl SourceReader {
+    fn new(source: usize, ring: Consumer<f32>, clocked: bool) -> Self {
+        Self { source, ring, primed: false, fill_avg: 0.0, warmup_frames: 0, warmup_snaps: 0, resampler: DriftResampler::new(), clocked }
+    }
 }
 
 /// One sink device's side of the engine, handed to [`DeviceIo::render`].
@@ -326,10 +344,18 @@ impl RenderStream {
         self.state.running.load(Ordering::Relaxed)
     }
 
+    /// Whether this output should be opened exclusively (bypassing the OS mixer).
+    pub fn exclusive(&self) -> bool {
+        self.node().exclusive.load(Ordering::Relaxed)
+    }
+
     /// The device opened: report it as running. `max_frames` is the largest block
     /// [`fill`](Self::fill) will be asked for, so the audio path never allocates.
     pub fn started(&mut self, info: StreamInfo, max_frames: usize) {
-        self.scratch.resize((max_frames + 1) * CHANNELS, 0.0);
+        self.scratch.resize(max_frames * CHANNELS, 0.0);
+        for input in &mut self.ins {
+            input.resampler.reserve(max_frames);
+        }
         let params = self.state.params.clone();
         self.state.started(&params.sinks[self.index], info);
     }
@@ -347,10 +373,11 @@ impl RenderStream {
         let stats = &params.sinks[k];
         let frames = mix.len() / CHANNELS;
         let n = frames * CHANNELS;
-        if self.scratch.len() < (frames + 1) * CHANNELS {
-            self.scratch.resize((frames + 1) * CHANNELS, 0.0);
+        if self.scratch.len() < n {
+            self.scratch.resize(n, 0.0);
         }
         mix.fill(0.0);
+        let mut drift = 0f64;
 
         for input in &mut self.ins {
             let mut buffered = input.ring.slots() / CHANNELS;
@@ -365,21 +392,26 @@ impl RenderStream {
                 }
             }
             if !input.primed {
-                if buffered < target_frames {
+                // Enough for this block plus the resampler's lookahead, even when the
+                // device asks for more than the target at once (else it underruns forever).
+                let prime_frames = target_frames.max(frames + DriftResampler::LOOKAHEAD);
+                if buffered < prime_frames {
                     continue;
                 }
                 // Not audible here yet, so a backlog (e.g. a burst at stream start) can
-                // be skipped outright instead of drained one drift correction at a time.
-                let excess = buffered - target_frames;
+                // be skipped outright instead of drained by the rate correction.
+                let excess = buffered - prime_frames;
                 if excess > 0
+                    && input.clocked
                     && let Ok(chunk) = input.ring.read_chunk(excess * CHANNELS)
                 {
                     chunk.commit_all();
                     stats.dropped_frames.fetch_add(excess as u64, Ordering::Relaxed);
-                    buffered = target_frames;
+                    buffered = prime_frames;
                 }
                 input.primed = true;
                 input.fill_avg = buffered as f32;
+                input.resampler.reset();
                 // Re-buffering during a warm-up continues it rather than starting another.
                 if input.warmup_frames == 0 {
                     input.warmup_frames = WARMUP_FRAMES;
@@ -387,10 +419,13 @@ impl RenderStream {
                 }
             }
 
+            // Audio held in the resampler counts as buffered too.
+            let held = input.resampler.buffered().max(0.0) as usize;
             let (target, band) = (target_frames as f32, params.band_frames());
-            if input.warmup_frames > 0 {
+            let buffered_total = (buffered + held) as f32;
+            if input.clocked && input.warmup_frames > 0 {
                 input.warmup_frames = input.warmup_frames.saturating_sub(frames);
-                input.fill_avg += (buffered as f32 - input.fill_avg) * WARMUP_SMOOTHING;
+                input.fill_avg += (buffered_total - input.fill_avg) * WARMUP_SMOOTHING;
                 if input.warmup_snaps > 0 {
                     if input.fill_avg > target + band && buffered > target_frames {
                         // A sustained backlog: skip it in one go.
@@ -408,41 +443,36 @@ impl RenderStream {
                         continue;
                     }
                 }
-            } else {
-                input.fill_avg += (buffered as f32 - input.fill_avg) * FILL_SMOOTHING;
+            } else if input.clocked {
+                input.fill_avg += (buffered_total - input.fill_avg) * FILL_SMOOTHING;
             }
 
-            // Drift correction: read one frame more (source fast) or less (source slow).
-            let take = if frames < SLIP_WINDOW {
-                frames
-            } else if input.fill_avg > target + band {
-                frames + 1
-            } else if input.fill_avg < target - band {
-                frames - 1
-            } else {
-                frames
-            };
+            // Drift correction: consume input slightly faster (source fast, fill above
+            // target) or slower than we play it.
+            let ratio = if input.clocked { 1.0 + ((input.fill_avg - target) as f64 * DRIFT_GAIN).clamp(-MAX_DRIFT, MAX_DRIFT) } else { 1.0 };
+            if (ratio - 1.0).abs() > drift.abs() {
+                drift = ratio - 1.0;
+            }
 
-            let (got, _) = input.ring.pop_partial_slice(&mut self.scratch[..take * CHANNELS]);
-            let got = got.len();
-            let routed = params.route(input.source, k);
-            if got < take * CHANNELS {
-                // Underrun: play what arrived, then re-buffer before mixing this source again.
+            let need = input.resampler.needed(frames, ratio);
+            let slot = input.resampler.input_slot(need);
+            let got = input.ring.pop_partial_slice(slot).0.len();
+            input.resampler.commit(need, got);
+            if got < need * CHANNELS {
+                // Underrun: drop this block and re-buffer before mixing this source again.
                 input.primed = false;
                 stats.underruns.fetch_add(1, Ordering::Relaxed);
-                if routed {
-                    let len = got.min(n);
-                    mix_into(&mut mix[..len], &self.scratch[..len]);
-                }
                 continue;
             }
-            if take != frames {
-                stats.slips.fetch_add(1, Ordering::Relaxed);
-            }
-            if routed {
-                mix_into(mix, &self.scratch[..got]);
+            let out = &mut self.scratch[..n];
+            input.resampler.process(out, ratio);
+            if params.route(input.source, k) {
+                for (o, x) in mix.iter_mut().zip(out.iter()) {
+                    *o += *x;
+                }
             }
         }
+        stats.drift_ppm.store((drift * 1e6) as f32);
 
         stats.process(mix);
         stats.tap(mix);
@@ -516,7 +546,7 @@ impl Engine {
         }
         for ((k, device), ins) in sinks.iter().enumerate().zip(consumers) {
             let Some(device) = device.clone() else { continue };
-            let ins = ins.into_iter().map(|(source, ring)| SourceReader { source, ring, primed: false, fill_avg: 0.0, warmup_frames: 0, warmup_snaps: 0 }).collect();
+            let ins = ins.into_iter().map(|(source, ring)| SourceReader::new(source, ring, matches!(sources[source], SourceSpec::Device(_)))).collect();
             let stream = RenderStream {
                 index: k,
                 ins,
@@ -574,46 +604,16 @@ fn apply_delay(line: &mut [f32], pos: &mut usize, delay: usize, buf: &mut [f32])
     }
 }
 
-/// Add interleaved-stereo `input` into `out`. If `input` is one frame longer or
-/// shorter, the last `SLIP_WINDOW` frames are linearly resampled to fit, so a
-/// drift correction leaves no discontinuity.
-fn mix_into(out: &mut [f32], input: &[f32]) {
-    let out_frames = out.len() / CHANNELS;
-    let in_frames = input.len() / CHANNELS;
-    let w = SLIP_WINDOW.min(out_frames);
-    if in_frames == out_frames || w < 2 {
-        for (o, x) in out.iter_mut().zip(input) {
-            *o += *x;
-        }
-        return;
-    }
-    let head = out_frames - w;
-    for (o, x) in out[..head * CHANNELS].iter_mut().zip(input) {
-        *o += *x;
-    }
-    let src = &input[head * CHANNELS..];
-    let src_frames = in_frames - head;
-    let step = (src_frames - 1) as f32 / (w - 1) as f32;
-    for i in 0..w {
-        let pos = i as f32 * step;
-        let j = pos as usize;
-        let j1 = (j + 1).min(src_frames - 1);
-        let frac = pos - j as f32;
-        for c in 0..CHANNELS {
-            out[(head + i) * CHANNELS + c] += src[j * CHANNELS + c] * (1.0 - frac) + src[j1 * CHANNELS + c] * frac;
-        }
-    }
-}
-
 /// Feed the file player into the sink rings. The player has no clock of its own,
-/// so it simply keeps every ring just under the sinks' target fill; each sink then
-/// plays it at its own device rate and no drift correction is ever needed.
+/// so it simply keeps every ring a little above the sinks' target fill (enough for
+/// a full block plus the resampler's lookahead); each sink then plays it 1:1 at its
+/// own device rate and no drift correction is ever needed.
 fn feed_player(player: &Player, s: usize, params: &Params, mut outs: Vec<Producer<f32>>, running: &AtomicBool) {
     const BLOCK_FRAMES: usize = 480;
     let mut buf = vec![0f32; BLOCK_FRAMES * CHANNELS];
     while running.load(Ordering::Relaxed) {
         let fill = outs.iter().map(|o| RING_FRAMES - o.slots() / CHANNELS).min();
-        let wants_audio = fill.is_some_and(|f| f < params.target_frames.saturating_sub(BLOCK_FRAMES / 2).max(BLOCK_FRAMES / 2));
+        let wants_audio = fill.is_some_and(|f| f < params.target_frames + DriftResampler::LOOKAHEAD);
         let frames = if wants_audio { player.read(&mut buf) } else { 0 };
         if frames == 0 {
             std::thread::sleep(Duration::from_millis(2));
@@ -632,12 +632,15 @@ fn feed_player(player: &Player, s: usize, params: &Params, mut outs: Vec<Produce
 pub struct Topology {
     pub sources: Vec<(String, Option<crate::DeviceId>)>,
     pub sinks: Vec<(String, Option<crate::DeviceId>)>,
+    /// Per sink: open exclusively. Changing it reopens the device, so it's part of the topology.
+    pub sink_exclusive: Vec<bool>,
 }
 
 impl Topology {
     pub fn of(graph: &RoutingGraph) -> Self {
         let bind = |nodes: &[GraphNode]| nodes.iter().map(|n| (n.key.clone(), n.device.clone())).collect();
-        Self { sources: bind(&graph.sources), sinks: bind(&graph.sinks) }
+        let sink_exclusive = graph.sinks.iter().map(|n| n.exclusive).collect();
+        Self { sources: bind(&graph.sources), sinks: bind(&graph.sinks), sink_exclusive }
     }
 }
 
@@ -714,6 +717,9 @@ impl EngineHost {
         // Stop the old engine first so its devices are released.
         self.running = None;
         let params = Arc::new(Params::new(topology.sources.len(), topology.sinks.len(), self.target_frames));
+        for (sink, &exclusive) in params.sinks.iter().zip(&topology.sink_exclusive) {
+            sink.exclusive.store(exclusive, Ordering::Relaxed);
+        }
         let mut sources = sources;
         for (s, reason) in disabled {
             sources[s] = None;
@@ -826,8 +832,8 @@ impl EngineHost {
             .map(|(key, _, p)| {
                 let underruns = p.underruns.load(Ordering::Relaxed);
                 let dropped = p.dropped_frames.load(Ordering::Relaxed);
-                let slips = p.slips.load(Ordering::Relaxed);
-                format!("{key}: {underruns} underruns, {slips} drift corrections, {dropped} backlog frames dropped")
+                let ppm = p.drift_ppm.load();
+                format!("{key}: {underruns} underruns, clock drift {ppm:+.0} ppm, {dropped} backlog frames dropped")
             })
             .collect()
     }
@@ -921,22 +927,26 @@ mod tests {
     }
 
     #[test]
-    fn mix_into_hides_one_frame_corrections() {
-        // A ramp stays a (slightly steeper/shallower) ramp: no jumps at the seam.
-        let frames = 256;
-        for extra in [-1i32, 0, 1] {
-            let in_frames = (frames as i32 + extra) as usize;
-            let input: Vec<f32> = (0..in_frames).flat_map(|i| [i as f32, i as f32]).collect();
-            let mut out = vec![0.0; frames * CHANNELS];
-            mix_into(&mut out, &input);
-            assert_eq!(out[0], 0.0);
-            assert_eq!(out[out.len() - 1], (in_frames - 1) as f32, "block ends on the last input frame");
-            let lefts: Vec<f32> = out.iter().step_by(CHANNELS).copied().collect();
-            for pair in lefts.windows(2) {
-                let step = pair[1] - pair[0];
-                assert!((0.9..=1.1).contains(&step), "step {step} with extra {extra}");
-            }
+    fn blocks_larger_than_the_target_still_play() {
+        // A device may ask for its whole buffer at once, beyond the target fill;
+        // priming must leave room for that plus the resampler's lookahead.
+        let params = Arc::new(Params::new(1, 1, 480));
+        params.set_route(0, 0, true);
+        params.sinks[0].set(0.0, false, false, false);
+        let (mut tx, rx) = RingBuffer::new(RING_FRAMES * CHANNELS);
+        let state = StreamState { params: params.clone(), running: Arc::new(AtomicBool::new(true)), ready: None };
+        let delay_line = vec![0.0; (MAX_DELAY_FRAMES + 1) * CHANNELS];
+        let mut stream = RenderStream { index: 0, ins: vec![SourceReader::new(0, rx, true)], delay_line, delay_pos: 0, scratch: Vec::new(), state };
+        let block = vec![0.5f32; 961 * CHANNELS];
+        let mut mix = vec![0f32; 960 * CHANNELS];
+        let mut played = 0;
+        for _ in 0..20 {
+            tx.push_entire_slice(&block).unwrap();
+            stream.fill(&mut mix);
+            played += usize::from(mix[mix.len() - 1] > 0.49);
         }
+        // Before, every prime left too little for such a block: it underran forever and played nothing.
+        assert!(played >= 10, "played {played} of 20 blocks");
     }
 
     #[test]
@@ -980,7 +990,7 @@ mod tests {
 
     impl DeviceIo for FakeIo {
         fn capture(&self, _device: &str, mut stream: CaptureStream) {
-            let info = StreamInfo { sample_rate: 48_000, channels: 2, bits: 32, buffer_frames: 240 };
+            let info = StreamInfo { sample_rate: 48_000, channels: 2, bits: 32, buffer_frames: 240, exclusive: false };
             stream.started(info);
             let mut block = vec![0.5f32; 240 * CHANNELS];
             while stream.is_running() {
@@ -991,7 +1001,7 @@ mod tests {
         }
 
         fn render(&self, _device: &str, mut stream: RenderStream) {
-            let info = StreamInfo { sample_rate: 48_000, channels: 2, bits: 32, buffer_frames: 240 };
+            let info = StreamInfo { sample_rate: 48_000, channels: 2, bits: 32, buffer_frames: 240, exclusive: false };
             stream.started(info, 240);
             let mut mix = vec![0f32; 240 * CHANNELS];
             while stream.is_running() {
@@ -1015,6 +1025,7 @@ mod tests {
             mono: false,
             reverse: false,
             delay_ms: 0.0,
+            exclusive: false,
         };
         let graph = RoutingGraph {
             sources: vec![node("mic", -6.0206)],

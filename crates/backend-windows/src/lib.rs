@@ -142,7 +142,7 @@ impl AudioBackend for WindowsBackend {
 
     fn capabilities(&self) -> Capabilities {
         // Virtual devices come from VB-Cable; per-app routing (IAudioPolicyConfigFactory) is TODO.
-        Capabilities { create_virtual_devices: false, per_app_routing: false }
+        Capabilities { create_virtual_devices: false, per_app_routing: false, exclusive_mode: true }
     }
 
     fn devices(&mut self) -> Result<Vec<DeviceInfo>> {
@@ -203,6 +203,65 @@ impl AudioBackend for WindowsBackend {
         }
     }
 }
+
+/// An app's audio session on a playback device, for diagnostics (`openmeeter apps`).
+pub struct AppSession {
+    pub device: String,
+    pub pid: u32,
+    pub process: String,
+    pub active: bool,
+}
+
+/// Every non-expired audio session on every active playback and recording device.
+pub fn app_sessions() -> Result<Vec<AppSession>> {
+    ensure_com()?;
+    let enumerator = wasapi::DeviceEnumerator::new().map_err(platform_err)?;
+    let mut sessions = Vec::new();
+    for (direction, side) in [(wasapi::Direction::Render, "playback"), (wasapi::Direction::Capture, "recording")] {
+        let collection = enumerator.get_device_collection(&direction).map_err(platform_err)?;
+        collect_sessions(&collection, side, &mut sessions)?;
+    }
+    Ok(sessions)
+}
+
+fn collect_sessions(collection: &wasapi::DeviceCollection, side: &str, sessions: &mut Vec<AppSession>) -> Result<()> {
+    for device in collection {
+        let device = device.map_err(platform_err)?;
+        let name = format!("{} [{side}]", device.get_friendlyname().unwrap_or_default());
+        let list = device.get_iaudiosessionmanager().and_then(|m| m.get_audiosessionenumerator()).map_err(platform_err)?;
+        for i in 0..list.get_count().map_err(platform_err)? {
+            let Ok(session) = list.get_session(i) else { continue };
+            let state = session.get_state().map_err(platform_err)?;
+            if matches!(state, wasapi::SessionState::Expired) {
+                continue;
+            }
+            let pid = session.get_process_id().unwrap_or(0);
+            sessions.push(AppSession { device: name.clone(), pid, process: process_name(pid), active: matches!(state, wasapi::SessionState::Active) });
+        }
+    }
+    Ok(())
+}
+
+fn process_name(pid: u32) -> String {
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
+    if pid == 0 {
+        return "System sounds".into();
+    }
+    // SAFETY: the handle is only used for the query below and closed by windows-rs on drop.
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return format!("pid {pid}") };
+        let mut buf = [0u16; 512];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
+        let _ = windows::Win32::Foundation::CloseHandle(handle);
+        if !ok {
+            return format!("pid {pid}");
+        }
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        path.rsplit('\\').next().unwrap_or(&path).to_string()
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

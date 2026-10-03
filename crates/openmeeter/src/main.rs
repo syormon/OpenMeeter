@@ -50,6 +50,8 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         play: Option<std::path::PathBuf>,
     },
+    /// List which apps are playing or recording audio on each device (Windows).
+    Apps,
     /// Print the config file location.
     ConfigPath,
 }
@@ -104,6 +106,7 @@ fn main() -> anyhow::Result<()> {
     match args.command {
         None => ui::run(backend, config_path),
         Some(Command::Devices) => cli::devices(backend),
+        Some(Command::Apps) => cli::apps(),
         Some(Command::Doctor) => cli::doctor(backend),
         Some(Command::Record { seconds, play }) => cli::record(backend, &config::load(&config_path), seconds, play),
         Some(Command::Meters { seconds }) => cli::meters(backend, &config::load(&config_path), seconds),

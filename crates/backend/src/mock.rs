@@ -24,7 +24,7 @@ impl AudioBackend for MockBackend {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities { create_virtual_devices: true, per_app_routing: true }
+        Capabilities { create_virtual_devices: true, per_app_routing: true, exclusive_mode: false }
     }
 
     fn devices(&mut self) -> Result<Vec<DeviceInfo>> {

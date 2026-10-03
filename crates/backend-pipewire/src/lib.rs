@@ -190,7 +190,7 @@ impl AudioBackend for PipeWireBackend {
 
     fn capabilities(&self) -> Capabilities {
         // Per-app routing (moving app streams between sinks) is TODO.
-        Capabilities { create_virtual_devices: true, per_app_routing: false }
+        Capabilities { create_virtual_devices: true, per_app_routing: false, exclusive_mode: false }
     }
 
     fn devices(&mut self) -> Result<Vec<DeviceInfo>> {
@@ -276,6 +276,7 @@ mod tests {
             mono: false,
             reverse: false,
             delay_ms: 0.0,
+            exclusive: false,
         }
     }
 

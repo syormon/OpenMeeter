@@ -163,6 +163,10 @@ pub struct Bus {
     /// Monitoring Synchro Delay, in milliseconds.
     #[serde(default)]
     pub delay_ms: f32,
+    /// Open the output device exclusively (Windows), bypassing the Windows mixer
+    /// and its effects, as Voicemeeter does. Hardware buses only.
+    #[serde(default)]
+    pub exclusive: bool,
 }
 
 pub const MAX_BUS_DELAY_MS: f32 = 500.0;
@@ -321,6 +325,7 @@ impl Mixer {
             eq: false,
             reverse: false,
             delay_ms: 0.0,
+            exclusive: false,
         };
 
         let strips = (1..=hw_in)
@@ -355,6 +360,7 @@ impl Mixer {
             mono: false,
             reverse: false,
             delay_ms: 0.0,
+            exclusive: false,
         };
         let sources = self
             .strips
@@ -371,6 +377,7 @@ impl Mixer {
                 mono: s.mono,
                 reverse: false,
                 delay_ms: 0.0,
+                exclusive: false,
             })
             .chain(std::iter::once(player))
             .collect();
@@ -386,6 +393,7 @@ impl Mixer {
                 mono: b.mono,
                 reverse: b.reverse,
                 delay_ms: b.delay_ms.clamp(0.0, MAX_BUS_DELAY_MS),
+                exclusive: b.exclusive && b.kind == Kind::Hardware,
             })
             .collect();
         let routes = self

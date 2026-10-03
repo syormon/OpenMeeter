@@ -454,7 +454,8 @@ impl App {
         } else {
             Default::default()
         };
-        let info = menu::SystemInfo { devices: &self.devices, streams: &streams, errors: &errors, config_path: &path };
+        let exclusive_mode = self.backend.capabilities().exclusive_mode;
+        let info = menu::SystemInfo { devices: &self.devices, streams: &streams, errors: &errors, config_path: &path, exclusive_mode };
         if menu::system_settings(ctx, &mut self.windows.system_settings, &mut self.config.settings, &mut self.config.mixer, &info) {
             self.backend.set_buffer_ms(self.config.settings.buffer_ms);
             self.apply();
