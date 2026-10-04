@@ -48,7 +48,12 @@ pub struct Display {
 pub struct Recorder {
     player: Option<Arc<Player>>,
     loaded: Option<LoadedFile>,
+    /// Where the loaded file came from, so a macro replaying it skips decoding.
+    loaded_path: Option<PathBuf>,
     loading: Option<(String, JoinHandle<Decoded>)>,
+    /// Path being decoded, and whether to play it once decoded regardless of the
+    /// play-on-load setting (a macro's sound clip).
+    loading_path: Option<(PathBuf, bool)>,
     recording: Option<ActiveRecording>,
     /// Last saved file or error, shown on the display.
     message: Option<(String, bool)>,
@@ -56,7 +61,7 @@ pub struct Recorder {
 
 impl Recorder {
     pub fn new(player: Option<Arc<Player>>) -> Self {
-        Self { player, loaded: None, loading: None, recording: None, message: None }
+        Self { player, loaded: None, loaded_path: None, loading: None, loading_path: None, recording: None, message: None }
     }
 
     /// Finish background work (a decoded file, a failed writer), apply the loop
@@ -67,15 +72,17 @@ impl Recorder {
         }
         if self.loading.as_ref().is_some_and(|(_, t)| t.is_finished()) {
             let (name, thread) = self.loading.take().expect("checked above");
+            let (path, force_play) = self.loading_path.take().unzip();
             match thread.join().unwrap_or_else(|_| Err("decoder crashed".into())) {
                 Ok((file, samples)) => {
                     if let Some(player) = &self.player {
                         player.load(samples.into());
-                        if settings.play_on_load {
+                        if settings.play_on_load || force_play == Some(true) {
                             player.play();
                         }
                     }
                     self.loaded = Some(file);
+                    self.loaded_path = path;
                     self.message = None;
                 }
                 Err(e) => self.message = Some((format!("Couldn't load {name}: {e}"), true)),
@@ -104,21 +111,47 @@ impl Recorder {
             player.unload();
         }
         self.loaded = None;
+        self.loaded_path = None;
         self.message = None;
     }
 
     pub fn load(&mut self, path: PathBuf) {
+        self.start_loading(path, false);
+    }
+
+    /// Play `path` from the start: at once if it's the loaded file, else after
+    /// decoding it (whatever the play-on-load setting says).
+    pub fn play_file(&mut self, path: PathBuf) {
+        if self.loaded_path.as_ref() == Some(&path)
+            && let Some(player) = &self.player
+        {
+            player.seek(0);
+            player.play();
+            return;
+        }
+        self.start_loading(path, true);
+    }
+
+    fn start_loading(&mut self, path: PathBuf, play: bool) {
         if self.player.is_none() {
             self.message = Some(("This audio backend can't play files yet".into(), true));
             return;
         }
         let name = file_name(&path);
+        self.loading_path = Some((path.clone(), play));
         let thread = std::thread::spawn(move || decode_file(&path));
         self.loading = Some((name, thread));
     }
 
     pub fn is_loading(&self) -> bool {
         self.loading.is_some()
+    }
+
+    /// Stop playback and rewind, leaving any recording running.
+    pub fn stop_playback(&mut self) {
+        if let Some(player) = &self.player {
+            player.stop();
+        }
     }
 
     pub fn play_pause(&mut self) {

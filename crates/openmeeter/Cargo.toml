@@ -10,6 +10,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 directories = "6.0.0"
 eframe = "0.36.2"
 env_logger = "0.11.11"
+global-hotkey = "0.8"
 hound = "3.5.1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 log = "0.4.34"
@@ -25,7 +26,7 @@ tray-icon = "0.25.1"
 
 [target."cfg(windows)".dependencies]
 openmeeter-windows = { version = "0.1.0", path = "../backend-windows" }
-windows-sys = { version = "0.61.2", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console", "Win32_UI_Input_KeyboardAndMouse"] }
 winreg = "0.56.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]

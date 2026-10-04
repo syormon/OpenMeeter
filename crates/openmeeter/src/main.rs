@@ -7,6 +7,7 @@ mod config;
 mod autostart;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
+mod macros;
 mod model;
 mod recorder;
 mod ui;

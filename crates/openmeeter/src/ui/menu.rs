@@ -25,6 +25,7 @@ pub enum MenuAction {
     SetLockUi(bool),
     OpenSystemSettings,
     OpenRecorderOptions,
+    OpenMacros,
     RefreshDevices,
     ShutDown,
 }
@@ -115,6 +116,9 @@ pub fn contents(ui: &mut Ui, state: &MenuState) -> Option<MenuAction> {
     }
     if ui.button("Tape Recorder Options...").clicked() {
         pick(A::OpenRecorderOptions);
+    }
+    if ui.button("Macro Buttons / Hotkeys...").clicked() {
+        pick(A::OpenMacros);
     }
     if ui.button("Refresh Device List").clicked() {
         pick(A::RefreshDevices);

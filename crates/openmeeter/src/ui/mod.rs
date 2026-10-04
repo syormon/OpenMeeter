@@ -1,6 +1,7 @@
 //! Voicemeeter-style skin: a fixed design grid, scaled to fit the window.
 
 mod ballistics;
+mod macros;
 mod menu;
 mod panels;
 mod recorder_options;
@@ -134,6 +135,9 @@ struct App {
     recorder: Recorder,
     tray: Option<tray::Tray>,
     windows: menu::Windows,
+    macros_ui: macros::State,
+    /// Global hotkeys for the macro buttons, or why they're unavailable.
+    hotkeys: Result<crate::macros::Hotkeys, String>,
     /// Set by Shut Down so closing the window really quits even with the tray on.
     quitting: bool,
     /// Cached "run on startup" state (read from the system, which owns it).
@@ -166,6 +170,11 @@ impl App {
             recorder: Recorder::new(None),
             tray: None,
             windows: menu::Windows::default(),
+            macros_ui: macros::State::default(),
+            hotkeys: {
+                let ctx = ctx.clone();
+                crate::macros::Hotkeys::new(move || ctx.request_repaint())
+            },
             quitting: false,
             run_on_startup: crate::autostart::is_enabled(),
             next_restart_check: Instant::now() + RESTART_CHECK_MIN,
@@ -353,6 +362,7 @@ impl App {
             A::SetLockUi(on) => settings.lock_ui = on,
             A::OpenSystemSettings => self.windows.system_settings = true,
             A::OpenRecorderOptions => self.windows.recorder_options = true,
+            A::OpenMacros => self.macros_ui.open = true,
             A::RefreshDevices => self.refresh_devices(),
             A::ShutDown => {
                 self.quitting = true;
@@ -465,12 +475,57 @@ impl App {
         if let Some(action) = recorder_options::window(ctx, &mut self.windows.recorder_options, recorder, &inputs, &buses) {
             self.handle_recorder(action);
         }
+        let targets = macro_targets(&self.config.mixer);
+        let no_errors = HashMap::new();
+        let info = macros::Info {
+            targets: &targets,
+            errors: self.hotkeys.as_ref().map_or(&no_errors, |h| &h.errors),
+            unavailable: self.hotkeys.as_ref().err().map(String::as_str),
+        };
+        if let Some(i) = macros::window(ctx, &mut self.macros_ui, &mut self.config.settings.macros, &info) {
+            self.run_macro(i);
+        }
         if self.windows.confirm_reset
             && let Some(reset) = menu::confirm_reset(ctx)
         {
             self.windows.confirm_reset = false;
             if reset {
                 self.config.mixer = Mixer::default();
+            }
+        }
+    }
+
+    /// Register changed hotkeys and run the macros whose hotkeys were pressed.
+    fn poll_hotkeys(&mut self) {
+        let Ok(hotkeys) = &mut self.hotkeys else { return };
+        hotkeys.sync(&self.config.settings.macros, self.macros_ui.capturing.is_some());
+        for i in hotkeys.fired() {
+            self.run_macro(i);
+        }
+    }
+
+    fn run_macro(&mut self, i: usize) {
+        use crate::macros::MacroAction as M;
+        let Some(m) = self.config.settings.macros.get(i) else { return };
+        log::info!("macro: {}", m.name);
+        match m.action.clone() {
+            M::RestartEngine => self.restart_engine(),
+            M::PlayClip { path: Some(path) } => self.recorder.play_file(path),
+            M::PlayClip { path: None } => self.status = Some(format!("Macro \"{}\" has no sound clip chosen", m.name)),
+            M::StopPlayback => self.recorder.stop_playback(),
+            M::ToggleRecording => {
+                let labels = self.config.mixer.node_labels();
+                self.recorder.toggle_record(&mut *self.backend, &self.config.mixer.recorder, &labels);
+            }
+            M::ToggleMute { key } => {
+                let mixer = &mut self.config.mixer;
+                let mute = mixer.strips.iter_mut().find(|s| s.key == key).map(|s| &mut s.mute);
+                let mute = mute.or_else(|| mixer.buses.iter_mut().find(|b| b.key == key).map(|b| &mut b.mute));
+                if let Some(mute) = mute {
+                    *mute = !*mute;
+                    self.apply();
+                    self.unsaved_since.get_or_insert_with(Instant::now);
+                }
             }
         }
     }
@@ -677,6 +732,12 @@ fn armables(mixer: &Mixer) -> (Vec<recorder_options::Armable>, Vec<recorder_opti
     (inputs, buses)
 }
 
+/// What a mute macro can target: every strip (by label) and bus (by key).
+fn macro_targets(mixer: &Mixer) -> Vec<(String, String)> {
+    let strips = mixer.strips.iter().map(|s| (s.key.clone(), s.label.clone()));
+    strips.chain(mixer.buses.iter().map(|b| (b.key.clone(), format!("Bus {}", b.key)))).collect()
+}
+
 fn settings_dialog() -> rfd::FileDialog {
     let dir = directories::UserDirs::new().and_then(|d| d.document_dir().map(|p| p.join("OpenMeeter")));
     let dialog = rfd::FileDialog::new().add_filter("OpenMeeter settings", &["json"]);
@@ -704,10 +765,15 @@ fn fit_zoom(ctx: &egui::Context, design: egui::Vec2) {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.tray_and_close(ctx);
+        // Hotkeys and the clips they load must work while the window is hidden.
+        self.poll_hotkeys();
+        self.recorder.poll(&mut *self.backend, &self.config.mixer.recorder);
+        if self.recorder.is_loading() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        self.recorder.poll(&mut *self.backend, &self.config.mixer.recorder);
         self.auto_restart();
         let before = self.config.mixer.clone();
         let settings_before = self.config.settings.clone();

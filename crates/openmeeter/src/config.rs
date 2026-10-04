@@ -28,6 +28,8 @@ pub struct AppSettings {
     pub startup_preset: Option<PathBuf>,
     /// Audio buffered per source, in milliseconds.
     pub buffer_ms: u32,
+    /// Macro buttons and their global hotkeys.
+    pub macros: Vec<crate::macros::Macro>,
 }
 
 impl Default for AppSettings {
@@ -40,6 +42,7 @@ impl Default for AppSettings {
             lock_ui: false,
             startup_preset: None,
             buffer_ms: 20,
+            macros: Vec::new(),
         }
     }
 }
