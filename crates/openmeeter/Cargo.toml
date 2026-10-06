@@ -35,6 +35,9 @@ gtk = "0.18"
 winit = { version = "0.30", default-features = false, features = ["x11"] }
 openmeeter-pipewire = { version = "0.1.0", path = "../backend-pipewire" }
 
+[target.'cfg(not(any(windows, target_os = "linux", target_os = "macos")))'.dependencies]
+eframe = { version = "0.36.2", features = ["glow"] }
+
 [build-dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png", "ico"] }
 winresource = "0.1.31"

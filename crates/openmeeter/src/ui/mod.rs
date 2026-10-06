@@ -79,6 +79,10 @@ pub fn run(backend: Box<dyn AudioBackend>, config_path: PathBuf) -> anyhow::Resu
     }
     #[cfg(not(target_os = "linux"))]
     let _ = &mut options;
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        options.renderer = eframe::Renderer::Glow;
+    }
     eframe::run_native(
         "OpenMeeter",
         options,
