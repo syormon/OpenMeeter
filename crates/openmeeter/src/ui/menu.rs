@@ -159,7 +159,7 @@ const SAMPLES_PER_MS: u32 = 48;
 /// audio over and over).
 pub fn system_settings(ctx: &egui::Context, open: &mut bool, settings: &mut AppSettings, mixer: &mut Mixer, info: &SystemInfo) -> bool {
     let mut buffer_committed = false;
-    let frame = egui::Frame::window(&ctx.global_style()).fill(theme::BG).stroke(egui::Stroke::new(1.0, theme::PANEL_STROKE));
+    let frame = egui::Frame::window(&ctx.global_style()).fill(theme::colors().bg).stroke(egui::Stroke::new(1.0, theme::colors().panel_stroke));
     egui::Window::new("System Settings / Options")
         .open(open)
         .frame(frame)
@@ -171,13 +171,13 @@ pub fn system_settings(ctx: &egui::Context, open: &mut bool, settings: &mut AppS
         .show(ctx, |ui| {
             ui.set_width(540.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("System Settings / Information").color(theme::TEXT_DIM));
+                ui.label(RichText::new("System Settings / Information").color(theme::colors().text_dim));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(format!("OpenMeeter Version: {}", env!("CARGO_PKG_VERSION"))).color(theme::TEXT_DIM));
+                    ui.label(RichText::new(format!("OpenMeeter Version: {}", env!("CARGO_PKG_VERSION"))).color(theme::colors().text_dim));
                 });
             });
 
-            egui::Frame::new().fill(theme::PANEL).corner_radius(8).inner_margin(8).show(ui, |ui| {
+            egui::Frame::new().fill(theme::colors().panel).corner_radius(8).inner_margin(8).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 let mut n = 0;
                 for strip in mixer.strips.iter().filter(|s| s.kind == Kind::Hardware) {
@@ -198,7 +198,7 @@ pub fn system_settings(ctx: &egui::Context, open: &mut bool, settings: &mut AppS
                 ui.allocate_ui(egui::vec2(340.0, 90.0), |ui| {
                     ui.set_min_width(340.0);
                     egui::Grid::new("buffering").num_columns(3).spacing([8.0, 6.0]).show(ui, |ui| {
-                        ui.label(RichText::new("Buffering WASAPI:").color(theme::TEXT_DIM));
+                        ui.label(RichText::new("Buffering WASAPI:").color(theme::colors().text_dim));
                         let mut samples = settings.buffer_ms * SAMPLES_PER_MS;
                         let resp = ui.add(
                             egui::DragValue::new(&mut samples)
@@ -215,10 +215,10 @@ pub fn system_settings(ctx: &egui::Context, open: &mut bool, settings: &mut AppS
                             settings.buffer_ms
                         );
                         resp.on_hover_text(hover);
-                        ui.label(RichText::new(format!("(default: {})", DEFAULT_BUFFER_MS * SAMPLES_PER_MS)).small().color(theme::TEXT_FAINT));
+                        ui.label(RichText::new(format!("(default: {})", DEFAULT_BUFFER_MS * SAMPLES_PER_MS)).small().color(theme::colors().text_faint));
                         ui.end_row();
 
-                        ui.label(RichText::new("Preferred Main SampleRate:").color(theme::TEXT_DIM));
+                        ui.label(RichText::new("Preferred Main SampleRate:").color(theme::colors().text_dim));
                         ui.add_enabled(false, egui::Button::new("48000 Hz")).on_disabled_hover_text("The engine always runs at 48 kHz; devices are converted.");
                         ui.label("");
                         ui.end_row();
@@ -226,10 +226,10 @@ pub fn system_settings(ctx: &egui::Context, open: &mut bool, settings: &mut AppS
                 });
 
                 ui.vertical(|ui| {
-                    ui.label(RichText::new("Monitoring Synchro Delay:").color(theme::TEXT_DIM));
+                    ui.label(RichText::new("Monitoring Synchro Delay:").color(theme::colors().text_dim));
                     egui::Grid::new("delays").num_columns(3).spacing([8.0, 6.0]).show(ui, |ui| {
                         for bus in mixer.buses.iter_mut().filter(|b| b.kind == Kind::Hardware) {
-                            ui.label(RichText::new(format!("OUT {}:", bus.key)).color(theme::TEXT_DIM));
+                            ui.label(RichText::new(format!("OUT {}:", bus.key)).color(theme::colors().text_dim));
                             let drag = egui::DragValue::new(&mut bus.delay_ms).range(0.0..=MAX_BUS_DELAY_MS).speed(0.5).fixed_decimals(2).suffix(" ms");
                             ui.add(drag).on_hover_text("Delays this output, e.g. to line your speakers up with a stream or video.");
                             if info.exclusive_mode {
@@ -244,7 +244,7 @@ pub fn system_settings(ctx: &egui::Context, open: &mut bool, settings: &mut AppS
             });
 
             ui.add_space(6.0);
-            ui.label(RichText::new(format!("Config: {}", info.config_path)).small().color(theme::TEXT_FAINT));
+            ui.label(RichText::new(format!("Config: {}", info.config_path)).small().color(theme::colors().text_faint));
         });
     buffer_committed
 }
@@ -255,20 +255,20 @@ fn device_row(ui: &mut Ui, title: &str, key: &str, device: &Option<DeviceId>, in
     let stream = info.streams.get(key);
     let error = info.errors.get(key);
     let (status, status_color) = match (device_name, stream, error) {
-        (Some(_), _, Some(_)) => ("ERROR", theme::RED),
-        (Some(_), Some(_), None) => ("ON", egui::Color32::WHITE),
-        _ => ("OFF", theme::TEXT_FAINT),
+        (Some(_), _, Some(_)) => ("ERROR", theme::colors().red),
+        (Some(_), Some(_), None) => ("ON", theme::colors().text_bright),
+        _ => ("OFF", theme::colors().text_faint),
     };
-    let value = if stream.is_some() { egui::Color32::WHITE } else { theme::TEXT_FAINT };
+    let value = if stream.is_some() { theme::colors().text_bright } else { theme::colors().text_faint };
 
     let mut frame = egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 3)).corner_radius(6);
     if highlight {
-        frame = frame.stroke(egui::Stroke::new(1.0, theme::OUTLINE)).fill(theme::BG);
+        frame = frame.stroke(egui::Stroke::new(1.0, theme::colors().outline)).fill(theme::colors().bg);
     }
     frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            cell(ui, 175.0, RichText::new(title).size(14.0).color(theme::TEXT_DIM));
+            cell(ui, 175.0, RichText::new(title).size(14.0).color(theme::colors().text_dim));
             let resp = key_value(ui, 95.0, "Status: ", status, status_color);
             if let Some(error) = error {
                 resp.on_hover_text(error);
@@ -280,9 +280,9 @@ fn device_row(ui: &mut Ui, title: &str, key: &str, device: &Option<DeviceId>, in
             key_value(ui, 40.0, "r:", &fmt(stream.map(|s| s.bits.to_string())), value);
         });
         let line = match device_name {
-            Some(name) if stream.is_some_and(|s| s.exclusive) => RichText::new(format!("WASAPI exclusive: {name}")).color(theme::TEXT),
-            Some(name) => RichText::new(format!("WASAPI: {name}")).color(theme::TEXT),
-            None => RichText::new("- none -").color(theme::TEXT_FAINT),
+            Some(name) if stream.is_some_and(|s| s.exclusive) => RichText::new(format!("WASAPI exclusive: {name}")).color(theme::colors().text),
+            Some(name) => RichText::new(format!("WASAPI: {name}")).color(theme::colors().text),
+            None => RichText::new("- none -").color(theme::colors().text_faint),
         };
         ui.label(line.small());
     });
@@ -292,7 +292,7 @@ fn device_row(ui: &mut Ui, title: &str, key: &str, device: &Option<DeviceId>, in
 fn key_value(ui: &mut Ui, width: f32, key: &str, value: &str, value_color: egui::Color32) -> egui::Response {
     let mut job = egui::text::LayoutJob::default();
     let font = egui::FontId::proportional(14.0);
-    job.append(key, 0.0, egui::TextFormat::simple(font.clone(), theme::TEXT_FAINT));
+    job.append(key, 0.0, egui::TextFormat::simple(font.clone(), theme::colors().text_faint));
     job.append(value, 0.0, egui::TextFormat::simple(font, value_color));
     fixed_width(ui, width, |ui| ui.label(job))
 }

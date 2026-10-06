@@ -1,16 +1,13 @@
 //! Recorder Options, laid out like Voicemeeter's: I/O arming on top, file
 //! settings in the middle, playback options at the bottom.
 
-use eframe::egui::{self, Align2, Color32, Popup, RichText, Sense, Stroke, StrokeKind, Ui, vec2};
+use eframe::egui::{self, Align2, Popup, RichText, Sense, Stroke, StrokeKind, Ui, vec2};
 
 use super::panels::RecorderAction;
 use super::theme;
 use crate::model::{MAX_GAIN_DB, MIN_GAIN_DB, RecordFormat, RecordSource, RecorderSettings};
 use crate::recorder::recordings_folder;
 
-const ARMED: Color32 = Color32::from_rgb(240, 100, 85);
-const ARMED_IDLE: Color32 = Color32::from_rgb(120, 70, 68);
-const VALUE_BOX: Color32 = Color32::from_rgb(34, 46, 58);
 const BUTTON_SIZE: egui::Vec2 = egui::vec2(92.0, 44.0);
 const STOP_AFTER: [Option<u32>; 8] = [None, Some(1), Some(5), Some(10), Some(15), Some(30), Some(60), Some(120)];
 
@@ -29,7 +26,7 @@ pub fn window(
     buses: &[Armable],
 ) -> Option<RecorderAction> {
     let mut action = None;
-    let frame = egui::Frame::window(&ctx.global_style()).fill(theme::BG).stroke(Stroke::new(1.0, theme::PANEL_STROKE));
+    let frame = egui::Frame::window(&ctx.global_style()).fill(theme::colors().bg).stroke(Stroke::new(1.0, theme::colors().panel_stroke));
     egui::Window::new("Recorder Options")
         .open(open)
         .frame(frame)
@@ -53,7 +50,7 @@ pub fn window(
             }
             ui.add_space(10.0);
 
-            egui::Frame::new().fill(theme::PANEL).corner_radius(4).inner_margin(10).show(ui, |ui| {
+            egui::Frame::new().fill(theme::colors().panel).corner_radius(4).inner_margin(10).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 if let Some(a) = file_settings(ui, settings) {
                     action = Some(a);
@@ -67,10 +64,10 @@ pub fn window(
 
 fn heading(ui: &mut Ui, text: &str) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(text).size(17.0).strong().color(theme::TEXT));
+        ui.label(RichText::new(text).size(17.0).strong().color(theme::colors().text));
         let rect = ui.available_rect_before_wrap();
         let y = rect.center().y;
-        ui.painter().line_segment([egui::pos2(rect.left() + 6.0, y), egui::pos2(rect.right(), y)], Stroke::new(1.5, theme::TEXT_DIM));
+        ui.painter().line_segment([egui::pos2(rect.left() + 6.0, y), egui::pos2(rect.right(), y)], Stroke::new(1.5, theme::colors().text_dim));
     });
 }
 
@@ -88,10 +85,10 @@ fn arm_row(
     ui.horizontal(|ui| {
         let (rect, resp) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::click());
         let p = ui.painter();
-        p.rect_filled(rect, 2.0, VALUE_BOX);
-        p.rect_stroke(rect, 2.0, Stroke::new(1.0, theme::OUTLINE), StrokeKind::Inside);
+        p.rect_filled(rect, 2.0, theme::colors().value_box);
+        p.rect_stroke(rect, 2.0, Stroke::new(1.0, theme::colors().outline), StrokeKind::Inside);
         if active {
-            p.circle_filled(rect.center(), 9.0, Color32::from_rgb(230, 20, 20));
+            p.circle_filled(rect.center(), 9.0, theme::colors().record_dot);
         }
         if resp.on_hover_text("Record this row").clicked() {
             selected = true;
@@ -99,9 +96,9 @@ fn arm_row(
 
         ui.allocate_ui(vec2(200.0, 40.0), |ui| {
             ui.vertical(|ui| {
-                let color = if active { theme::BLUE } else { theme::TEXT_FAINT };
+                let color = if active { theme::colors().blue } else { theme::colors().text_faint };
                 ui.label(RichText::new(title).size(15.0).strong().color(color));
-                ui.label(RichText::new(subtitle).small().color(if active { theme::TEXT } else { theme::TEXT_FAINT }));
+                ui.label(RichText::new(subtitle).small().color(if active { theme::colors().text } else { theme::colors().text_faint }));
             });
         });
 
@@ -112,20 +109,20 @@ fn arm_row(
             let radius = 10.0;
             match (on, active) {
                 (true, true) => {
-                    p.rect_filled(rect, radius, ARMED);
+                    p.rect_filled(rect, radius, theme::colors().armed);
                 }
                 (true, false) => {
-                    p.rect_filled(rect, radius, ARMED_IDLE);
+                    p.rect_filled(rect, radius, theme::colors().armed_idle);
                 }
                 (false, _) => {
-                    let stroke = if resp.hovered() { theme::TEXT_DIM } else { theme::OUTLINE };
+                    let stroke = if resp.hovered() { theme::colors().text_dim } else { theme::colors().outline };
                     p.rect_stroke(rect, radius, Stroke::new(1.5, stroke), StrokeKind::Inside);
                 }
             }
             let (top, bottom) = match (on, active) {
-                (true, true) => (Color32::from_rgb(255, 225, 220), Color32::WHITE),
-                (true, false) => (theme::TEXT_DIM, theme::TEXT_DIM),
-                (false, _) => (theme::TEXT_FAINT, theme::TEXT_FAINT),
+                (true, true) => (theme::colors().armed_text, theme::colors().text_bright),
+                (true, false) => (theme::colors().text_dim, theme::colors().text_dim),
+                (false, _) => (theme::colors().text_faint, theme::colors().text_faint),
             };
             p.text(rect.center() - vec2(0.0, 9.0), Align2::CENTER_CENTER, node.kind, theme::font(11.0), top);
             let clip = p.with_clip_rect(rect.shrink(4.0));
@@ -146,15 +143,15 @@ fn arm_row(
 /// Dark box showing a value, like Voicemeeter's option fields.
 fn value_box(ui: &mut Ui, text: &str, width: f32) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(width, 24.0), Sense::click());
-    let fill = if resp.hovered() { Color32::from_rgb(46, 60, 74) } else { VALUE_BOX };
+    let fill = if resp.hovered() { theme::colors().value_box_hover } else { theme::colors().value_box };
     let p = ui.painter();
     p.rect_filled(rect, 2.0, fill);
-    p.text(rect.center(), Align2::CENTER_CENTER, text, egui::FontId::proportional(14.0), Color32::WHITE);
+    p.text(rect.center(), Align2::CENTER_CENTER, text, egui::FontId::proportional(14.0), theme::colors().text_bright);
     resp
 }
 
 fn key_label(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).color(theme::TEXT_DIM));
+    ui.label(RichText::new(text).color(theme::colors().text_dim));
 }
 
 fn yes_no(ui: &mut Ui, value: &mut bool) {
@@ -169,7 +166,7 @@ fn file_settings(ui: &mut Ui, settings: &mut RecorderSettings) -> Option<Recorde
         key_label(ui, "Target Directory:");
         ui.horizontal(|ui| {
             let mut folder = recordings_folder(settings).display().to_string();
-            let edit = egui::TextEdit::singleline(&mut folder).desired_width(520.0).text_color(Color32::WHITE);
+            let edit = egui::TextEdit::singleline(&mut folder).desired_width(520.0).text_color(theme::colors().text_bright);
             if ui.add(edit).changed() {
                 settings.folder = Some(folder.into());
             }
@@ -229,7 +226,7 @@ fn file_settings(ui: &mut Ui, settings: &mut RecorderSettings) -> Option<Recorde
 }
 
 fn playback_settings(ui: &mut Ui, settings: &mut RecorderSettings) {
-    egui::Frame::new().fill(Color32::from_rgb(24, 32, 40)).corner_radius(4).inner_margin(10).show(ui, |ui| {
+    egui::Frame::new().fill(theme::colors().inset).corner_radius(4).inner_margin(10).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             key_label(ui, "Play On Load:");

@@ -13,6 +13,7 @@ A Voicemeeter-style audio mixer for Windows and Linux. Windows requires `VB-Cabl
 - [x] Windows: per-output exclusive mode (bypasses the Windows mixer and effects, like Voicemeeter)
 - [x] Windows: outputs play in raw mode, bypassing device effects (Realtek "enhancements", virtual surround, loudness) without taking the device exclusively
 - [x] Macro buttons: global hotkeys (e.g. Ctrl+F12, Numpad7) to restart the engine, play a sound clip, stop playback, start/stop recording or toggle a mute (X11 only on Linux)
+- [x] Custom colour themes from the config file (see [Theming](#theming))
 - [ ] MIDI mapping, VBAN
 - [x] Linux backend: device enumeration, virtual inputs/buses created on demand, mixing engine,
       meters, recorder and player, feedback guard, unplug detection, real-time audio threads, tray icon
@@ -57,6 +58,30 @@ In `OpenMeeter`:
 3.) For `Master Section`, select one of the last second columns (B1,B2) and select `LINE 1`.
 
 4.) Make sure your devices are on the right channels. In the screenshot, I have the `CABLE Input` outputting to `A1`(speakers) and I have `Focusrite USB Audio Mic` outputting to `B1`, which is `LINE 1`
+
+## Theming
+
+Every colour can be overridden from the config file like as so:
+
+```json
+{
+  "mixer": { ... },
+  "settings": {
+    "theme": {
+      "bg": "#1d1b26",
+      "accent": "#b48ef0",
+      "boost": "#27F561",
+      "fader_track": "#D113B7",
+      "meter_green": "#8a6cf0"
+    }
+  }
+}
+```
+
+`bg`, `accent` (lit buttons, faders, knob rings) and `boost` (a fader above 0 dB) each recolour
+their whole family in matching shades; `openmeeter theme` lists every colour that can be set.
+
+> **`Menu` > `Load Settings...`**
 
 ## Running locally
 

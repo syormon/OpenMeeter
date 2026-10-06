@@ -32,7 +32,7 @@ pub fn text_lines_centered(painter: &Painter, center: Pos2, s: &str, size: f32, 
 pub fn button(ui: &mut Ui, rect: Rect, id: Id, label: &str, on: bool, accent: Color32) -> Response {
     let resp = ui.interact(rect, id, Sense::click());
     paint_button(ui, rect, &resp, on, accent);
-    let color = if on { accent } else { theme::TEXT_DIM };
+    let color = if on { accent } else { theme::colors().text_dim };
     text_lines_centered(ui.painter(), rect.center(), label, 13.0, color);
     resp
 }
@@ -42,8 +42,8 @@ fn paint_button(ui: &Ui, rect: Rect, resp: &Response, on: bool, accent: Color32)
     let radius = CornerRadius::same(6);
     let (fill, stroke) = match (on, resp.hovered()) {
         (true, _) => (accent.gamma_multiply(0.12), Stroke::new(1.5, accent)),
-        (false, true) => (theme::PANEL, Stroke::new(1.2, theme::TEXT_DIM)),
-        (false, false) => (Color32::TRANSPARENT, Stroke::new(1.0, theme::OUTLINE)),
+        (false, true) => (theme::colors().panel, Stroke::new(1.2, theme::colors().text_dim)),
+        (false, false) => (Color32::TRANSPARENT, Stroke::new(1.0, theme::colors().outline)),
     };
     painter.rect_filled(rect, radius, fill);
     painter.rect_stroke(rect, radius, stroke, StrokeKind::Inside);
@@ -52,8 +52,8 @@ fn paint_button(ui: &Ui, rect: Rect, resp: &Response, on: bool, accent: Color32)
 /// Bus routing button ("▶A1"), with the triangle painted rather than a glyph.
 pub fn route_button(ui: &mut Ui, rect: Rect, id: Id, bus: &str, on: bool) -> Response {
     let resp = ui.interact(rect, id, Sense::click());
-    paint_button(ui, rect, &resp, on, theme::GREEN);
-    let color = if on { theme::GREEN } else { theme::TEXT_DIM };
+    paint_button(ui, rect, &resp, on, theme::colors().green);
+    let color = if on { theme::colors().green } else { theme::colors().text_dim };
     let painter = ui.painter();
     let c = rect.center();
     let tri_x = c.x - 12.0;
@@ -66,7 +66,17 @@ pub fn route_button(ui: &mut Ui, rect: Rect, id: Id, bus: &str, on: bool) -> Res
     resp
 }
 
-/// Rotary knob. Drag vertically to change, double-click to reset.
+/// Colour for a knob's value: highlighted once the knob is off its reset position.
+pub fn knob_value_color(value: f32, default: f32) -> Color32 {
+    if knob_is_on(value, default) { theme::colors().knob_value_on } else { theme::colors().text_dim }
+}
+
+fn knob_is_on(value: f32, default: f32) -> bool {
+    (value - default).abs() >= 0.05
+}
+
+/// Rotary knob. Drag vertically to change, double-click to reset. Its ring lights
+/// up while it is off its reset position.
 #[allow(clippy::too_many_arguments)]
 pub fn knob(
     ui: &mut Ui,
@@ -90,15 +100,20 @@ pub fn knob(
     scroll_adjust(ui, &resp, value, range, (hi - lo) / 40.0);
 
     let painter = ui.painter();
-    let ring = if resp.hovered() || resp.dragged() { theme::TEXT_DIM } else { theme::OUTLINE };
-    painter.circle(center, radius, theme::PANEL, Stroke::new(2.0, ring));
+    let on = knob_is_on(*value, default);
+    let ring = match (on, resp.hovered() || resp.dragged()) {
+        (true, _) => theme::colors().knob_on,
+        (false, true) => theme::colors().text_dim,
+        (false, false) => theme::colors().outline,
+    };
+    painter.circle(center, radius, theme::colors().panel, Stroke::new(if on { 2.5 } else { 2.0 }, ring));
     // 270° sweep, starting bottom-left.
     let t = (*value - lo) / (hi - lo);
     let angle = -0.75 * PI + t * 1.5 * PI;
     let dot = center + vec2(angle.sin(), -angle.cos()) * (radius - 6.0);
-    painter.circle_filled(dot, 3.0, theme::TEXT);
+    painter.circle_filled(dot, 3.0, theme::colors().text);
     if show_value {
-        text(painter, center, Align2::CENTER_CENTER, &format!("{:.0}", value), 11.0, theme::TEXT_DIM);
+        text(painter, center, Align2::CENTER_CENTER, &format!("{:.0}", value), 11.0, knob_value_color(*value, default));
     }
     resp.on_hover_text(format!("{value:.1}"))
 }
@@ -120,7 +135,8 @@ fn scroll_adjust(ui: &Ui, resp: &Response, value: &mut f32, (lo, hi): (f32, f32)
     }
 }
 
-/// Voicemeeter-style fader: mint track, round thumb showing the gain.
+/// Voicemeeter-style fader: mint track, round thumb showing the gain. It turns
+/// orange above 0 dB, where it boosts the signal and can clip.
 pub fn fader(ui: &mut Ui, rect: Rect, id: Id, gain_db: &mut f32, muted: bool) -> Response {
     let resp = ui.interact(rect, id, Sense::click_and_drag());
     let thumb_r = (rect.width() / 2.0 - 2.0).min(24.0);
@@ -142,20 +158,26 @@ pub fn fader(ui: &mut Ui, rect: Rect, id: Id, gain_db: &mut f32, muted: bool) ->
     let cx = rect.center().x;
     let track_w = thumb_r * 0.95;
     let track = Rect::from_min_max(pos2(cx - track_w / 2.0, rect.top() + 2.0), pos2(cx + track_w / 2.0, rect.bottom() - 2.0));
-    let track_color = if muted { theme::FADER_TRACK_DIM } else { theme::FADER_TRACK };
+    let unity = gain_db.abs() < 0.05;
+    let (track_color, track_dim, ring_color, thumb_color) = if *gain_db > 0.0 && !unity {
+        (theme::colors().fader_boost_track, theme::colors().fader_boost_track_dim, theme::colors().fader_boost_thumb_ring, theme::colors().fader_boost_thumb)
+    } else {
+        (theme::colors().fader_track, theme::colors().fader_track_dim, theme::colors().fader_thumb_ring, theme::colors().fader_thumb)
+    };
+    let track_color = if muted { track_dim } else { track_color };
     painter.rect_filled(track, CornerRadius::same(track_w as u8 / 2), track_color);
 
     // Rotated caption along the lower part of the track.
-    let galley = painter.layout_no_wrap("Fader Gain".into(), font(15.0), theme::BG);
+    let galley = painter.layout_no_wrap("Fader Gain".into(), font(15.0), theme::colors().bg);
     let pos = pos2(cx - galley.size().y / 2.0, track.bottom() - 8.0);
-    painter.add(TextShape::new(pos, galley, theme::BG).with_angle(-FRAC_PI_2));
+    painter.add(TextShape::new(pos, galley, theme::colors().bg).with_angle(-FRAC_PI_2));
 
     let t = (*gain_db - MIN_GAIN_DB) / range;
     let thumb = pos2(cx, travel_top + (1.0 - t) * travel);
-    painter.circle_filled(thumb, thumb_r, theme::FADER_THUMB_RING);
-    painter.circle_filled(thumb, thumb_r - 4.0, theme::FADER_THUMB);
-    let label = if gain_db.abs() < 0.05 { "0dB".to_string() } else { format!("{gain_db:.1}") };
-    text(painter, thumb, Align2::CENTER_CENTER, &label, 12.0, Color32::WHITE);
+    painter.circle_filled(thumb, thumb_r, ring_color);
+    painter.circle_filled(thumb, thumb_r - 4.0, thumb_color);
+    let label = if unity { "0dB".to_string() } else { format!("{gain_db:.1}") };
+    text(painter, thumb, Align2::CENTER_CENTER, &label, 12.0, theme::colors().text_bright);
 
     resp.on_hover_text("Drag (Shift = fine), scroll, double-click = 0 dB")
 }
@@ -178,7 +200,7 @@ pub fn meter(painter: &Painter, rect: Rect, levels: &[MeterLevel]) {
             let y = rect.bottom() - (seg as f32 + 1.0) * (SEG_H + GAP) + GAP;
             let r = Rect::from_min_size(pos2(x, y), vec2(col_w, SEG_H));
             let lit = frac <= level || (hold > 0.0 && seg == hold_seg.min(segments - 1));
-            let color = if lit { segment_color(frac) } else { theme::METER_OFF };
+            let color = if lit { segment_color(frac) } else { theme::colors().meter_off };
             painter.rect_filled(r, 0.0, color);
         }
     }
@@ -186,9 +208,9 @@ pub fn meter(painter: &Painter, rect: Rect, levels: &[MeterLevel]) {
 
 fn segment_color(frac: f32) -> Color32 {
     match frac {
-        f if f > 0.95 => theme::METER_RED,
-        f if f > 0.8 => theme::METER_YELLOW,
-        _ => theme::METER_GREEN,
+        f if f > 0.95 => theme::colors().meter_red,
+        f if f > 0.8 => theme::colors().meter_yellow,
+        _ => theme::colors().meter_green,
     }
 }
 
@@ -213,15 +235,15 @@ pub fn xy_pad(ui: &mut Ui, rect: Rect, id: Id, pos: &mut [f32; 2], default: [f32
     }
 
     let painter = ui.painter();
-    painter.rect_filled(rect, CornerRadius::same(6), theme::PANEL);
-    painter.rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, theme::PANEL_STROKE), StrokeKind::Inside);
-    let grid = Stroke::new(1.0, theme::SEPARATOR);
+    painter.rect_filled(rect, CornerRadius::same(6), theme::colors().panel);
+    painter.rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, theme::colors().panel_stroke), StrokeKind::Inside);
+    let grid = Stroke::new(1.0, theme::colors().separator);
     painter.line_segment([pos2(rect.center().x, inner.top()), pos2(rect.center().x, inner.bottom())], grid);
     painter.line_segment([pos2(inner.left(), rect.center().y), pos2(inner.right(), rect.center().y)], grid);
 
     let handle = pos2(inner.left() + pos[0] * inner.width(), inner.bottom() - pos[1] * inner.height());
     let handle_rect = Rect::from_center_size(handle, vec2(14.0, 14.0));
-    painter.rect_filled(handle_rect, CornerRadius::same(3), Color32::from_rgb(140, 170, 195));
+    painter.rect_filled(handle_rect, CornerRadius::same(3), theme::colors().handle);
     resp
 }
 

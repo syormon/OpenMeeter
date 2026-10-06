@@ -32,7 +32,7 @@ pub fn window(ctx: &egui::Context, state: &mut State, list: &mut Vec<Macro>, inf
         capture(ctx, state, list, i);
     }
     let mut run = None;
-    let frame = egui::Frame::window(&ctx.global_style()).fill(theme::BG).stroke(Stroke::new(1.0, theme::PANEL_STROKE));
+    let frame = egui::Frame::window(&ctx.global_style()).fill(theme::colors().bg).stroke(Stroke::new(1.0, theme::colors().panel_stroke));
     let mut open = state.open;
     egui::Window::new("Macro Buttons")
         .open(&mut open)
@@ -45,18 +45,18 @@ pub fn window(ctx: &egui::Context, state: &mut State, list: &mut Vec<Macro>, inf
         .show(ctx, |ui| {
             ui.set_width(820.0);
             if let Some(why) = info.unavailable {
-                ui.label(RichText::new(format!("Global hotkeys are unavailable: {why}. Run buttons still work.")).color(theme::ORANGE));
+                ui.label(RichText::new(format!("Global hotkeys are unavailable: {why}. Run buttons still work.")).color(theme::colors().orange));
                 ui.add_space(4.0);
             }
             ui.label(
                 RichText::new("Hotkeys work in any app, even with OpenMeeter hidden. Click a hotkey box, then press the combo (Esc cancels).")
-                    .color(theme::TEXT_DIM),
+                    .color(theme::colors().text_dim),
             );
             ui.add_space(6.0);
             let mut delete = None;
             egui::Grid::new("macros").num_columns(6).spacing([8.0, 6.0]).show(ui, |ui| {
                 for header in ["Name", "Hotkey", "Action", "", "", ""] {
-                    ui.label(RichText::new(header).color(theme::TEXT_FAINT));
+                    ui.label(RichText::new(header).color(theme::colors().text_faint));
                 }
                 ui.end_row();
                 for (i, m) in list.iter_mut().enumerate() {
@@ -70,7 +70,7 @@ pub fn window(ctx: &egui::Context, state: &mut State, list: &mut Vec<Macro>, inf
                         delete = Some(i);
                     }
                     match info.errors.get(&i) {
-                        Some(e) => ui.label(RichText::new(e).color(theme::RED)),
+                        Some(e) => ui.label(RichText::new(e).color(theme::colors().red)),
                         None => ui.label(""),
                     };
                     ui.end_row();
@@ -117,11 +117,11 @@ fn hotkey_cell(ui: &mut Ui, state: &mut State, m: &mut Macro, i: usize) {
     ui.horizontal(|ui| {
         let capturing = state.capturing == Some(i);
         let text = if capturing {
-            RichText::new("Press a key combo...").color(theme::ORANGE)
+            RichText::new("Press a key combo...").color(theme::colors().orange)
         } else {
             match &m.hotkey {
-                Some(h) => RichText::new(h).color(theme::GREEN),
-                None => RichText::new("(none)").color(theme::TEXT_FAINT),
+                Some(h) => RichText::new(h).color(theme::colors().green),
+                None => RichText::new("(none)").color(theme::colors().text_faint),
             }
         };
         if ui.add_sized([160.0, 20.0], egui::Button::new(text).selected(capturing)).clicked() {

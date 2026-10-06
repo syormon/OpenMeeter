@@ -4,6 +4,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::model::Mixer;
+use crate::ui::theme::Palette;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -30,6 +31,8 @@ pub struct AppSettings {
     pub buffer_ms: u32,
     /// Macro buttons and their global hotkeys.
     pub macros: Vec<crate::macros::Macro>,
+    /// Colour overrides, by name: `{"bg": "#101820"}`. `openmeeter theme` lists the names.
+    pub theme: Palette,
 }
 
 impl Default for AppSettings {
@@ -43,6 +46,7 @@ impl Default for AppSettings {
             startup_preset: None,
             buffer_ms: 20,
             macros: Vec::new(),
+            theme: Default::default(),
         }
     }
 }
@@ -57,22 +61,41 @@ pub enum AutoRestart {
     AllDevices,
 }
 
-/// A preset holds only the mixer, so loading one never changes app behaviour.
+/// A preset holds the mixer and, if it isn't the default, the colour theme.
+/// Nothing else, so loading one never changes app behaviour.
 #[derive(Serialize, Deserialize)]
-struct Preset {
+struct PresetFile {
     mixer: Mixer,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    settings: Option<PresetSettings>,
 }
 
-pub fn save_preset(mixer: &Mixer, path: &Path) -> anyhow::Result<()> {
-    let preset = Preset { mixer: mixer.clone() };
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct PresetSettings {
+    theme: Palette,
+}
+
+/// What a settings file holds.
+#[derive(Debug, PartialEq)]
+pub struct Preset {
+    pub mixer: Mixer,
+    /// The file's theme; the default colours if it has none, so loading a file
+    /// without a theme goes back to the default look.
+    pub theme: Palette,
+}
+
+pub fn save_preset(mixer: &Mixer, theme: Palette, path: &Path) -> anyhow::Result<()> {
+    let settings = (theme != Palette::DEFAULT).then_some(PresetSettings { theme });
+    let preset = PresetFile { mixer: mixer.clone(), settings };
     std::fs::write(path, serde_json::to_string_pretty(&preset)?).with_context(|| format!("writing {}", path.display()))
 }
 
 /// Accepts preset files and full config files alike.
-pub fn load_preset(path: &Path) -> anyhow::Result<Mixer> {
+pub fn load_preset(path: &Path) -> anyhow::Result<Preset> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let preset: Preset = serde_json::from_str(&text).with_context(|| format!("{} isn't an OpenMeeter settings file", path.display()))?;
-    Ok(preset.mixer)
+    let file: PresetFile = serde_json::from_str(&text).with_context(|| format!("{} isn't an OpenMeeter settings file", path.display()))?;
+    Ok(Preset { mixer: file.mixer, theme: file.settings.unwrap_or_default().theme })
 }
 
 /// Default config location. The mock backend gets its own file so UI testing
@@ -122,20 +145,25 @@ mod tests {
     }
 
     #[test]
-    fn presets_hold_only_the_mixer() {
+    fn presets_hold_the_mixer_and_a_custom_theme() {
         let dir = std::env::temp_dir().join(format!("openmeeter-preset-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("preset.json");
         let mut mixer = Mixer::default();
         mixer.strips[0].gain_db = -12.0;
-        save_preset(&mixer, &path).unwrap();
-        assert_eq!(load_preset(&path).unwrap(), mixer);
-        assert!(!std::fs::read_to_string(&path).unwrap().contains("settings"));
+        save_preset(&mixer, Palette::DEFAULT, &path).unwrap();
+        assert_eq!(load_preset(&path).unwrap(), Preset { mixer: mixer.clone(), theme: Palette::DEFAULT }, "no theme means the default one");
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("settings"), "the default theme isn't written");
+
+        let mut theme = Palette::DEFAULT;
+        theme.bg = eframe::egui::Color32::from_rgb(30, 27, 38);
+        save_preset(&mixer, theme, &path).unwrap();
+        assert_eq!(load_preset(&path).unwrap(), Preset { mixer: mixer.clone(), theme });
 
         // A full config file loads as a preset too.
         let config = Config { mixer: mixer.clone(), ..Config::default() };
         std::fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
-        assert_eq!(load_preset(&path).unwrap(), mixer);
+        assert_eq!(load_preset(&path).unwrap(), Preset { mixer: mixer.clone(), theme: Palette::DEFAULT });
         assert!(load_preset(&dir.join("missing.json")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }

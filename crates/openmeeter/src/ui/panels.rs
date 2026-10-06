@@ -9,7 +9,7 @@ use openmeeter_backend::{DeviceId, DeviceInfo, Direction, driver_name};
 use super::ballistics::{Ballistics, MeterLevel};
 
 use super::theme;
-use super::widgets::{button, fader, knob, meter, route_button, text, xy_pad};
+use super::widgets::{button, fader, knob, knob_value_color, meter, route_button, text, xy_pad};
 use crate::model::{BusMode, KARAOKE_MODES, Kind, PanMode, RecorderSettings, Strip, default_strip_label};
 use crate::recorder::Display as RecorderDisplay;
 
@@ -61,17 +61,17 @@ impl Ctx<'_> {
     /// Red only when a device is chosen but missing or failing; otherwise normal text.
     fn device_label(&self, key: &str, id: &Option<DeviceId>, placeholder: &str) -> DeviceLabel {
         let Some(id) = id else {
-            return DeviceLabel { text: placeholder.to_owned(), color: theme::TEXT_FAINT, problem: None };
+            return DeviceLabel { text: placeholder.to_owned(), color: theme::colors().text_faint, problem: None };
         };
         match self.devices.iter().find(|d| &d.id == id) {
             None => DeviceLabel {
                 text: "(missing device)".to_owned(),
-                color: theme::RED,
+                color: theme::colors().red,
                 problem: Some("This device isn't connected. Plug it in and use Menu > Refresh devices.".to_owned()),
             },
             Some(d) => match self.errors.get(key) {
-                Some(err) => DeviceLabel { text: d.name.clone(), color: theme::RED, problem: Some(err.clone()) },
-                None => DeviceLabel { text: d.name.clone(), color: theme::TEXT, problem: None },
+                Some(err) => DeviceLabel { text: d.name.clone(), color: theme::colors().red, problem: Some(err.clone()) },
+                None => DeviceLabel { text: d.name.clone(), color: theme::colors().text, problem: None },
             },
         }
     }
@@ -91,7 +91,7 @@ fn header_name(p: &eframe::egui::Painter, rect: Rect, name: &str, color: eframe:
 }
 
 fn vline(ui: &Ui, o: Pos2, x: f32, y0: f32, y1: f32) {
-    ui.painter().line_segment([o + vec2(x, y0), o + vec2(x, y1)], Stroke::new(1.0, theme::SEPARATOR));
+    ui.painter().line_segment([o + vec2(x, y0), o + vec2(x, y1)], Stroke::new(1.0, theme::colors().separator));
 }
 
 /// Popup listing devices to bind to, opened by clicking `resp`.
@@ -172,11 +172,11 @@ fn route_buttons(ui: &mut Ui, o: Pos2, x: f32, w: f32, strip: &mut Strip, bus_ke
 
 fn solo_mute(ui: &mut Ui, o: Pos2, x: f32, w: f32, strip: &mut Strip) {
     let solo = r(o, x, EXTRA_Y[1], w, BTN_H);
-    if button(ui, solo, Id::new(("solo", &strip.key)), "solo", strip.solo, theme::ORANGE).clicked() {
+    if button(ui, solo, Id::new(("solo", &strip.key)), "solo", strip.solo, theme::colors().orange).clicked() {
         strip.solo = !strip.solo;
     }
     let mute = r(o, x, EXTRA_Y[2], w, BTN_H);
-    if button(ui, mute, Id::new(("mute", &strip.key)), "Mute", strip.mute, theme::RED).clicked() {
+    if button(ui, mute, Id::new(("mute", &strip.key)), "Mute", strip.mute, theme::colors().red).clicked() {
         strip.mute = !strip.mute;
     }
 }
@@ -188,13 +188,13 @@ pub fn hardware_strip(ui: &mut Ui, o: Pos2, x: f32, n: usize, strip: &mut Strip,
     let header = r(o, x, TITLE_H + 2.0, HW_STRIP_W, HEADER_BOTTOM - TITLE_H - 4.0);
     let resp = ui.interact(header, Id::new(("hw-header", &strip.key)), Sense::click());
     if strip.label == default_strip_label(Kind::Hardware, n) {
-        let title_end = text(&p, o + vec2(x + 6.0, HEADER_TITLE_Y), Align2::LEFT_CENTER, "HARDWARE INPUT", 15.0, theme::TEXT);
-        text(&p, pos2(title_end.right() + 5.0, title_end.center().y), Align2::LEFT_CENTER, &n.to_string(), 17.0, theme::TEXT);
+        let title_end = text(&p, o + vec2(x + 6.0, HEADER_TITLE_Y), Align2::LEFT_CENTER, "HARDWARE INPUT", 15.0, theme::colors().text);
+        text(&p, pos2(title_end.right() + 5.0, title_end.center().y), Align2::LEFT_CENTER, &n.to_string(), 17.0, theme::colors().text);
     } else {
         // A name set in System Settings replaces the title.
         let title_rect = r(o, x + 6.0, HEADER_TITLE_Y - 10.0, HW_STRIP_W - 12.0, 20.0);
         let title = strip.label.to_uppercase();
-        p.with_clip_rect(title_rect).text(title_rect.left_center(), Align2::LEFT_CENTER, title, theme::font(15.0), theme::TEXT);
+        p.with_clip_rect(title_rect).text(title_rect.left_center(), Align2::LEFT_CENTER, title, theme::font(15.0), theme::colors().text);
     }
     let label = ctx.device_label(&strip.key, &strip.device, "Select Input Device");
     header_name(&p, r(o, x + 6.0, HEADER_NAME_Y, HW_STRIP_W - 12.0, HEADER_NAME_H), &label.text, label.color);
@@ -204,12 +204,12 @@ pub fn hardware_strip(ui: &mut Ui, o: Pos2, x: f32, n: usize, strip: &mut Strip,
     rename_menu(&resp, &mut strip.label, default_strip_label(Kind::Hardware, n));
 
     // Intellipan.
-    text(&p, o + vec2(x + HW_STRIP_W / 2.0, 114.0), Align2::CENTER_CENTER, "INTELLIPAN", 13.0, theme::TEXT_DIM);
+    text(&p, o + vec2(x + HW_STRIP_W / 2.0, 114.0), Align2::CENTER_CENTER, "INTELLIPAN", 13.0, theme::colors().text_dim);
     let pad = r(o, x + 7.0, 128.0, HW_STRIP_W - 14.0, 128.0);
     xy_pad(ui, pad, Id::new(("pan", &strip.key)), &mut strip.pan, [0.5, 0.0]);
     let mode_rect = r(o, x + 12.0, 131.0, 100.0, 16.0);
     let mode = ui.interact(mode_rect, Id::new(("pan-mode", &strip.key)), Sense::click());
-    text(&p, mode_rect.left_center(), Align2::LEFT_CENTER, strip.pan_mode.label(), 11.0, theme::TEXT_DIM);
+    text(&p, mode_rect.left_center(), Align2::LEFT_CENTER, strip.pan_mode.label(), 11.0, theme::colors().text_dim);
     Popup::menu(&mode.on_hover_text("Intellipan mode")).show(|ui| {
         for m in PanMode::ALL {
             ui.selectable_value(&mut strip.pan_mode, m, m.label());
@@ -217,11 +217,11 @@ pub fn hardware_strip(ui: &mut Ui, o: Pos2, x: f32, n: usize, strip: &mut Strip,
     });
 
     // Comp / Audibility / Gate.
-    text(&p, o + vec2(x + 10.0, 271.0), Align2::LEFT_CENTER, "Comp.", 11.0, theme::TEXT_DIM);
-    text(&p, o + vec2(x + HW_STRIP_W / 2.0, 271.0), Align2::CENTER_CENTER, "AUDIBILITY", 13.0, theme::TEXT_DIM);
-    text(&p, o + vec2(x + HW_STRIP_W - 10.0, 271.0), Align2::RIGHT_CENTER, "Gate", 11.0, theme::TEXT_DIM);
+    text(&p, o + vec2(x + 10.0, 271.0), Align2::LEFT_CENTER, "Comp.", 11.0, theme::colors().text_dim);
+    text(&p, o + vec2(x + HW_STRIP_W / 2.0, 271.0), Align2::CENTER_CENTER, "AUDIBILITY", 13.0, theme::colors().text_dim);
+    text(&p, o + vec2(x + HW_STRIP_W - 10.0, 271.0), Align2::RIGHT_CENTER, "Gate", 11.0, theme::colors().text_dim);
     let knob_box = r(o, x + 10.0, 281.0, HW_STRIP_W - 20.0, 56.0);
-    p.rect_stroke(knob_box, 4.0, Stroke::new(1.0, theme::SEPARATOR), eframe::egui::StrokeKind::Inside);
+    p.rect_stroke(knob_box, 4.0, Stroke::new(1.0, theme::colors().separator), eframe::egui::StrokeKind::Inside);
     knob(ui, o + vec2(x + 45.0, 309.0), 21.0, Id::new(("comp", &strip.key)), &mut strip.comp, (0.0, 10.0), 0.0, true);
     knob(ui, o + vec2(x + 115.0, 309.0), 21.0, Id::new(("gate", &strip.key)), &mut strip.gate, (0.0, 10.0), 0.0, true);
 
@@ -230,7 +230,7 @@ pub fn hardware_strip(ui: &mut Ui, o: Pos2, x: f32, n: usize, strip: &mut Strip,
     fader(ui, r(o, x + 46.0, FADER_TOP, 54.0, 254.0), Id::new(("fader", &strip.key)), &mut strip.gain_db, strip.mute);
     route_buttons(ui, o, x + 106.0, 46.0, strip, bus_keys);
     let mono = r(o, x + 106.0, EXTRA_Y[0], 46.0, BTN_H);
-    if button(ui, mono, Id::new(("mono", &strip.key)), "mono", strip.mono, theme::BLUE).clicked() {
+    if button(ui, mono, Id::new(("mono", &strip.key)), "mono", strip.mono, theme::colors().blue).clicked() {
         strip.mono = !strip.mono;
     }
     solo_mute(ui, o, x + 106.0, 46.0, strip);
@@ -246,7 +246,7 @@ pub fn virtual_strip(ui: &mut Ui, o: Pos2, x: f32, j: usize, strip: &mut Strip, 
     rename_menu(&resp, &mut strip.label, default_strip_label(Kind::Virtual, j + 1));
     if ctx.can_create_virtual {
         let device = crate::model::virtual_strip_device(&strip.key, j + 1).description;
-        header_name(&p, name_rect, &device, theme::TEXT);
+        header_name(&p, name_rect, &device, theme::colors().text);
         resp.on_hover_text(format!("Apps play into this strip through the \"{device}\" output device (right-click to rename)"));
     } else {
         let label = ctx.device_label(&strip.key, &strip.device, "Select VB-Cable");
@@ -254,7 +254,7 @@ pub fn virtual_strip(ui: &mut Ui, o: Pos2, x: f32, j: usize, strip: &mut Strip, 
             header_name(&p, name_rect, &label.text, label.color);
         } else {
             let (top, bottom) = (name_rect.with_max_y(name_rect.min.y + 14.0), name_rect.with_min_y(name_rect.min.y + 14.0));
-            p.with_clip_rect(top).text(top.left_top(), Align2::LEFT_TOP, &strip.label, theme::font(11.0), theme::TEXT);
+            p.with_clip_rect(top).text(top.left_top(), Align2::LEFT_TOP, &strip.label, theme::font(11.0), theme::colors().text);
             p.with_clip_rect(bottom).text(bottom.left_top(), Align2::LEFT_TOP, &label.text, theme::font(10.0), label.color);
         }
         let hover = label.problem.unwrap_or_else(|| "Choose the cable apps play into, e.g. CABLE Input (right-click to rename)".to_owned());
@@ -263,25 +263,25 @@ pub fn virtual_strip(ui: &mut Ui, o: Pos2, x: f32, j: usize, strip: &mut Strip, 
     }
 
     // Equalizer: treble top-left, mid right, bass bottom-left, as in Voicemeeter.
-    text(&p, o + vec2(x + VIRT_STRIP_W / 2.0, 114.0), Align2::CENTER_CENTER, "EQUALIZER", 13.0, theme::TEXT_DIM);
+    text(&p, o + vec2(x + VIRT_STRIP_W / 2.0, 114.0), Align2::CENTER_CENTER, "EQUALIZER", 13.0, theme::colors().text_dim);
     let eq = (-12.0, 12.0);
     let k = |name: &str| Id::new((name, strip.key.clone()));
     knob(ui, o + vec2(x + 30.0, 152.0), 18.0, k("treble"), &mut strip.eq_treble, eq, 0.0, false);
-    text(&p, o + vec2(x + 84.0, 133.0), Align2::CENTER_CENTER, "Treble", 11.0, theme::BLUE);
-    text(&p, o + vec2(x + 84.0, 152.0), Align2::CENTER_CENTER, &format!("{:.1}", strip.eq_treble), 14.0, theme::TEXT_DIM);
+    text(&p, o + vec2(x + 84.0, 133.0), Align2::CENTER_CENTER, "Treble", 11.0, theme::colors().blue);
+    text(&p, o + vec2(x + 84.0, 152.0), Align2::CENTER_CENTER, &format!("{:.1}", strip.eq_treble), 14.0, knob_value_color(strip.eq_treble, 0.0));
     knob(ui, o + vec2(x + 80.0, 193.0), 18.0, k("mid"), &mut strip.eq_mid, eq, 0.0, false);
-    text(&p, o + vec2(x + 26.0, 193.0), Align2::CENTER_CENTER, &format!("{:.1}", strip.eq_mid), 14.0, theme::TEXT_DIM);
+    text(&p, o + vec2(x + 26.0, 193.0), Align2::CENTER_CENTER, &format!("{:.1}", strip.eq_mid), 14.0, knob_value_color(strip.eq_mid, 0.0));
     knob(ui, o + vec2(x + 30.0, 234.0), 18.0, k("bass"), &mut strip.eq_bass, eq, 0.0, false);
-    text(&p, o + vec2(x + 84.0, 234.0), Align2::CENTER_CENTER, &format!("{:.1}", strip.eq_bass), 14.0, theme::TEXT_DIM);
-    text(&p, o + vec2(x + 84.0, 254.0), Align2::CENTER_CENTER, "Bass", 11.0, theme::BLUE);
+    text(&p, o + vec2(x + 84.0, 234.0), Align2::CENTER_CENTER, &format!("{:.1}", strip.eq_bass), 14.0, knob_value_color(strip.eq_bass, 0.0));
+    text(&p, o + vec2(x + 84.0, 254.0), Align2::CENTER_CENTER, "Bass", 11.0, theme::colors().blue);
 
     // Surround panner + small meter.
     let pad = r(o, x + 8.0, 274.0, 68.0, 64.0);
     xy_pad(ui, pad, Id::new(("surround", &strip.key)), &mut strip.surround, [0.5, 0.5]);
-    text(&p, pad.center_top() + vec2(0.0, 9.0), Align2::CENTER_CENTER, "Front", 9.0, theme::TEXT_FAINT);
-    text(&p, pad.center_bottom() - vec2(0.0, 9.0), Align2::CENTER_CENTER, "Rear", 9.0, theme::TEXT_FAINT);
-    text(&p, pad.left_center() + vec2(8.0, 0.0), Align2::CENTER_CENTER, "L", 9.0, theme::TEXT_FAINT);
-    text(&p, pad.right_center() - vec2(8.0, 0.0), Align2::CENTER_CENTER, "R", 9.0, theme::TEXT_FAINT);
+    text(&p, pad.center_top() + vec2(0.0, 9.0), Align2::CENTER_CENTER, "Front", 9.0, theme::colors().text_faint);
+    text(&p, pad.center_bottom() - vec2(0.0, 9.0), Align2::CENTER_CENTER, "Rear", 9.0, theme::colors().text_faint);
+    text(&p, pad.left_center() + vec2(8.0, 0.0), Align2::CENTER_CENTER, "L", 9.0, theme::colors().text_faint);
+    text(&p, pad.right_center() - vec2(8.0, 0.0), Align2::CENTER_CENTER, "R", 9.0, theme::colors().text_faint);
     meter(&p, r(o, x + 84.0, 274.0, 18.0, 64.0), ctx.peaks(&strip.key));
 
     fader(ui, r(o, x + 6.0, FADER_TOP, 54.0, 254.0), Id::new(("fader", &strip.key)), &mut strip.gain_db, strip.mute);
@@ -290,13 +290,13 @@ pub fn virtual_strip(ui: &mut Ui, o: Pos2, x: f32, j: usize, strip: &mut Strip, 
     // Voicemeeter puts M.C on the first virtual strip and K (karaoke) on the second.
     let extra = r(o, x + 64.0, EXTRA_Y[0], 42.0, BTN_H);
     if j.is_multiple_of(2) {
-        let resp = button(ui, extra, Id::new(("mc", &strip.key)), "M.C", strip.mix_centre, theme::BLUE);
+        let resp = button(ui, extra, Id::new(("mc", &strip.key)), "M.C", strip.mix_centre, theme::colors().blue);
         if resp.on_hover_text("Mix to centre").clicked() {
             strip.mix_centre = !strip.mix_centre;
         }
     } else {
         let label = if strip.karaoke == 0 { "K".to_string() } else { format!("K{}", strip.karaoke) };
-        let resp = button(ui, extra, Id::new(("k", &strip.key)), &label, strip.karaoke > 0, theme::BLUE);
+        let resp = button(ui, extra, Id::new(("k", &strip.key)), &label, strip.karaoke > 0, theme::colors().blue);
         if resp.on_hover_text("Karaoke mode (click to cycle)").clicked() {
             strip.karaoke = (strip.karaoke + 1) % (KARAOKE_MODES + 1);
         }
@@ -306,7 +306,7 @@ pub fn virtual_strip(ui: &mut Ui, o: Pos2, x: f32, j: usize, strip: &mut Strip, 
 
 pub fn virtual_inputs_title(ui: &Ui, o: Pos2, x: f32, w: f32) {
     let p = ui.painter();
-    text(p, o + vec2(x + w / 2.0, HEADER_TITLE_Y), Align2::CENTER_CENTER, "VIRTUAL INPUTS", 15.0, theme::TEXT);
+    text(p, o + vec2(x + w / 2.0, HEADER_TITLE_Y), Align2::CENTER_CENTER, "VIRTUAL INPUTS", 15.0, theme::colors().text);
 }
 
 /// A1..An device selectors and the "HARDWARE OUT" device list.
@@ -319,10 +319,10 @@ pub fn hardware_out_header(ui: &mut Ui, o: Pos2, x: f32, buses: &mut [crate::mod
         let rect = r(o, x + 10.0 + i as f32 * 32.0, 42.0, 28.0, 42.0);
         let bound = bus.device.is_some();
         let resp = ui.interact(rect, Id::new(("out-header", &bus.key)), Sense::click());
-        let stroke = if resp.hovered() { theme::TEXT_DIM } else { theme::OUTLINE };
-        p.rect_filled(rect, 4.0, theme::PANEL);
+        let stroke = if resp.hovered() { theme::colors().text_dim } else { theme::colors().outline };
+        p.rect_filled(rect, 4.0, theme::colors().panel);
         p.rect_stroke(rect, 4.0, Stroke::new(1.0, stroke), eframe::egui::StrokeKind::Inside);
-        let color = if bound { theme::TEXT } else { theme::TEXT_DIM };
+        let color = if bound { theme::colors().text } else { theme::colors().text_dim };
         text(&p, rect.center() - vec2(0.0, 7.0), Align2::CENTER_CENTER, &bus.key, 14.0, color);
         let c = rect.center() + vec2(0.0, 10.0);
         p.add(eframe::egui::Shape::convex_polygon(
@@ -332,7 +332,7 @@ pub fn hardware_out_header(ui: &mut Ui, o: Pos2, x: f32, buses: &mut [crate::mod
         ));
         let label = ctx.device_label(&bus.key, &bus.device, "");
         if bus.device.is_some() {
-            let color = if label.problem.is_some() { theme::RED } else { theme::TEXT_DIM };
+            let color = if label.problem.is_some() { theme::colors().red } else { theme::colors().text_dim };
             names.push((format!("{}: {}", bus.key, label.text), color));
         }
         let hover = label.problem.unwrap_or_else(|| format!("Choose output device for {}", bus.key));
@@ -340,7 +340,7 @@ pub fn hardware_out_header(ui: &mut Ui, o: Pos2, x: f32, buses: &mut [crate::mod
     }
 
     let text_x = x + 16.0 + n as f32 * 32.0;
-    text(&p, o + vec2(text_x, 50.0), Align2::LEFT_CENTER, "HARDWARE OUT", 15.0, theme::TEXT);
+    text(&p, o + vec2(text_x, 50.0), Align2::LEFT_CENTER, "HARDWARE OUT", 15.0, theme::colors().text);
     let list = r(o, text_x, 60.0, RIGHT_W - (text_x - x) - 6.0, 32.0);
     let clipped = p.with_clip_rect(list);
     for (i, (line, color)) in names.iter().take(3).enumerate() {
@@ -373,23 +373,23 @@ pub fn recorder(
 ) -> Option<RecorderAction> {
     let p = ui.painter().clone();
     let mut action = None;
-    let dark = Color32::from_rgb(40, 50, 55);
+    let dark = theme::colors().recorder_ink;
 
     let body = r(o, x + 10.0, 104.0, 246.0, 168.0);
     let body_resp = ui.interact(body, Id::new("rec-body"), Sense::click());
-    p.rect_filled(body, 10.0, Color32::from_rgb(26, 34, 42));
+    p.rect_filled(body, 10.0, theme::colors().recorder_body);
     if display.recording {
-        p.rect_stroke(body, 10.0, Stroke::new(2.0, theme::RED), StrokeKind::Inside);
+        p.rect_stroke(body, 10.0, Stroke::new(2.0, theme::colors().red), StrokeKind::Inside);
     }
 
     // Screen: click to load a file.
     let screen = r(o, x + 20.0, 114.0, 226.0, 42.0);
     let screen_resp = ui.interact(screen, Id::new("rec-screen"), Sense::click());
-    p.rect_filled(screen, 4.0, theme::RECORDER_SCREEN);
-    let title_color = if display.recording { Color32::from_rgb(190, 30, 30) } else { dark };
+    p.rect_filled(screen, 4.0, theme::colors().recorder_screen);
+    let title_color = if display.recording { theme::colors().recorder_ink_alert } else { dark };
     let clip = p.with_clip_rect(screen.shrink(4.0));
     clip.text(screen.left_top() + vec2(6.0, 12.0), Align2::LEFT_CENTER, &display.title, theme::font(12.0), title_color);
-    let detail_color = if display.error { Color32::from_rgb(190, 30, 30) } else { dark };
+    let detail_color = if display.error { theme::colors().recorder_ink_alert } else { dark };
     clip.text(screen.left_top() + vec2(6.0, 30.0), Align2::LEFT_CENTER, &display.detail, theme::font(10.0), detail_color);
     if screen_resp.on_hover_text("Click to load an audio file (WAV, MP3, FLAC, OGG, M4A)").clicked() {
         action = Some(RecorderAction::Load);
@@ -397,17 +397,17 @@ pub fn recorder(
 
     // Tape window with reels that turn while playing or recording.
     let tape = r(o, x + 20.0, 162.0, 226.0, 60.0);
-    p.rect_filled(tape, 4.0, Color32::from_rgb(48, 60, 72));
+    p.rect_filled(tape, 4.0, theme::colors().recorder_tape);
     let spin = if display.playing || display.recording { ui.input(|i| i.time) as f32 * 3.0 } else { 0.0 };
     for cx in [tape.left() + 36.0, tape.right() - 36.0] {
         let c = pos2(cx, tape.center().y);
-        p.circle(c, 13.0, dark, Stroke::new(2.0, theme::OUTLINE));
+        p.circle(c, 13.0, dark, Stroke::new(2.0, theme::colors().outline));
         for k in 0..3 {
             let a = spin + k as f32 * std::f32::consts::TAU / 3.0;
-            p.circle_filled(c + vec2(a.cos(), a.sin()) * 8.0, 2.0, theme::OUTLINE);
+            p.circle_filled(c + vec2(a.cos(), a.sin()) * 8.0, 2.0, theme::colors().outline);
         }
     }
-    text(&p, tape.center(), Align2::CENTER_CENTER, &display.time, 14.0, theme::TEXT);
+    text(&p, tape.center(), Align2::CENTER_CENTER, &display.time, 14.0, theme::colors().text);
     if display.playing || display.recording {
         ui.ctx().request_repaint();
     }
@@ -429,9 +429,9 @@ pub fn recorder(
             _ => false,
         };
         let fill = match (lit, resp.hovered()) {
-            (true, _) => Color32::from_rgb(80, 98, 116),
-            (false, true) => Color32::from_rgb(68, 84, 100),
-            (false, false) => Color32::from_rgb(58, 72, 86),
+            (true, _) => theme::colors().transport_active,
+            (false, true) => theme::colors().transport_hover,
+            (false, false) => theme::colors().transport,
         };
         p.rect_filled(b, 3.0, fill);
         transport_icon(&p, b.center(), icon);
@@ -444,7 +444,7 @@ pub fn recorder(
     for (i, key) in bus_keys.iter().enumerate() {
         let b = r(o, x + 262.0, 112.0 + i as f32 * 31.0, 44.0, 26.0);
         let on = settings.playback_buses.contains(key);
-        let resp = button(ui, b, Id::new(("rec-out", key)), key, on, theme::GREEN);
+        let resp = button(ui, b, Id::new(("rec-out", key)), key, on, theme::colors().green);
         if resp.on_hover_text(format!("Play loaded files into {key}")).clicked() {
             if on {
                 settings.playback_buses.remove(key);
@@ -474,7 +474,7 @@ enum TransportIcon {
 
 fn transport_icon(p: &eframe::egui::Painter, c: Pos2, icon: TransportIcon) {
     use eframe::egui::Shape;
-    let color = theme::TEXT;
+    let color = theme::colors().text;
     // Right-pointing triangle with its left edge at `x`; `dir` = -1.0 mirrors it.
     let tri = |x: f32, dir: f32| {
         Shape::convex_polygon(
@@ -504,15 +504,15 @@ fn transport_icon(p: &eframe::egui::Painter, c: Pos2, icon: TransportIcon) {
             p.rect_filled(Rect::from_center_size(c, vec2(11.0, 11.0)), 1.0, color);
         }
         TransportIcon::Record => {
-            p.circle_filled(c, 6.0, theme::RED);
+            p.circle_filled(c, 6.0, theme::colors().red);
         }
     }
 }
 
 pub fn master_section(ui: &mut Ui, o: Pos2, x: f32, buses: &mut [crate::model::Bus], ctx: &Ctx) {
     let p = ui.painter().clone();
-    text(&p, o + vec2(x + RIGHT_W / 2.0, 290.0), Align2::CENTER_CENTER, "MASTER SECTION", 15.0, theme::TEXT);
-    let line = Stroke::new(1.0, theme::SEPARATOR);
+    text(&p, o + vec2(x + RIGHT_W / 2.0, 290.0), Align2::CENTER_CENTER, "MASTER SECTION", 15.0, theme::colors().text);
+    let line = Stroke::new(1.0, theme::colors().separator);
     p.line_segment([o + vec2(x + 8.0, 290.0), o + vec2(x + 90.0, 290.0)], line);
     p.line_segment([o + vec2(x + RIGHT_W - 90.0, 290.0), o + vec2(x + RIGHT_W - 8.0, 290.0)], line);
 
@@ -525,16 +525,16 @@ pub fn master_section(ui: &mut Ui, o: Pos2, x: f32, buses: &mut [crate::model::B
             physical_end = cx + col_w;
         }
 
-        let mode = button(ui, r(o, cx + 3.0, 300.0, w, 38.0), Id::new(("mode", &bus.key)), bus.mode.label(), bus.mode != BusMode::Normal, theme::BLUE);
+        let mode = button(ui, r(o, cx + 3.0, 300.0, w, 38.0), Id::new(("mode", &bus.key)), bus.mode.label(), bus.mode != BusMode::Normal, theme::colors().blue);
         Popup::menu(&mode.on_hover_text("Bus mode")).show(|ui| {
             for m in BusMode::ALL {
                 ui.selectable_value(&mut bus.mode, m, m.label().replace('\n', " "));
             }
         });
         let (label, lit, accent) = match (bus.mono, bus.reverse) {
-            (true, _) => ("mono", true, theme::BLUE),
-            (false, true) => ("reverse", true, theme::ORANGE),
-            (false, false) => ("mono", false, theme::BLUE),
+            (true, _) => ("mono", true, theme::colors().blue),
+            (false, true) => ("reverse", true, theme::colors().orange),
+            (false, false) => ("mono", false, theme::colors().blue),
         };
         let resp = button(ui, r(o, cx + 3.0, 344.0, w, 23.0), Id::new(("bmono", &bus.key)), label, lit, accent);
         if resp.on_hover_text("Click to cycle: stereo, mono, reverse (swap left and right)").clicked() {
@@ -544,10 +544,10 @@ pub fn master_section(ui: &mut Ui, o: Pos2, x: f32, buses: &mut [crate::model::B
                 (false, true) => (false, false),
             };
         }
-        if button(ui, r(o, cx + 3.0, 371.0, w, 23.0), Id::new(("beq", &bus.key)), "EQ", bus.eq, theme::BLUE).clicked() {
+        if button(ui, r(o, cx + 3.0, 371.0, w, 23.0), Id::new(("beq", &bus.key)), "EQ", bus.eq, theme::colors().blue).clicked() {
             bus.eq = !bus.eq;
         }
-        if button(ui, r(o, cx + 3.0, 398.0, w, 23.0), Id::new(("bmute", &bus.key)), "Mute", bus.mute, theme::RED).clicked() {
+        if button(ui, r(o, cx + 3.0, 398.0, w, 23.0), Id::new(("bmute", &bus.key)), "Mute", bus.mute, theme::colors().red).clicked() {
             bus.mute = !bus.mute;
         }
 
@@ -556,9 +556,9 @@ pub fn master_section(ui: &mut Ui, o: Pos2, x: f32, buses: &mut [crate::model::B
         let resp = ui.interact(label_rect, Id::new(("bus-label", &bus.key)), Sense::click());
         let label = ctx.device_label(&bus.key, &bus.device, "");
         let key_color = match (&label.problem, &bus.device) {
-            (Some(_), _) => theme::RED,
-            (None, Some(_)) => theme::TEXT,
-            (None, None) => theme::TEXT_DIM,
+            (Some(_), _) => theme::colors().red,
+            (None, Some(_)) => theme::colors().text,
+            (None, None) => theme::colors().text_dim,
         };
         let key_end = text(&p, label_rect.left_center(), Align2::LEFT_CENTER, &bus.key, 11.0, key_color);
         let is_virtual = bus.kind == Kind::Virtual;
@@ -597,7 +597,7 @@ pub fn master_section(ui: &mut Ui, o: Pos2, x: f32, buses: &mut [crate::model::B
         }
         let y = 610.0;
         let mid = (x0 + x1) / 2.0;
-        let t = text(&p, o + vec2(mid, y), Align2::CENTER_CENTER, label, 9.0, theme::TEXT_FAINT);
+        let t = text(&p, o + vec2(mid, y), Align2::CENTER_CENTER, label, 9.0, theme::colors().text_faint);
         p.line_segment([o + vec2(x0 + 4.0, y), pos2(t.left() - 4.0, t.center().y)], line);
         p.line_segment([pos2(t.right() + 4.0, t.center().y), o + vec2(x1 - 4.0, y)], line);
     };
@@ -609,12 +609,12 @@ pub fn master_section(ui: &mut Ui, o: Pos2, x: f32, buses: &mut [crate::model::B
 /// Separators between sections. `strip_edges` are `(x, top)` pairs.
 pub fn separators(ui: &Ui, o: Pos2, strip_edges: &[(f32, f32)], right_x: f32) {
     let p = ui.painter();
-    p.line_segment([o + vec2(0.0, HEADER_BOTTOM), o + vec2(right_x, HEADER_BOTTOM)], Stroke::new(1.0, theme::SEPARATOR));
+    p.line_segment([o + vec2(0.0, HEADER_BOTTOM), o + vec2(right_x, HEADER_BOTTOM)], Stroke::new(1.0, theme::colors().separator));
     for &(x, top) in strip_edges {
         vline(ui, o, x, top, DESIGN_H - 4.0);
     }
     p.line_segment(
         [o + vec2(right_x, TITLE_H), o + vec2(right_x, DESIGN_H)],
-        Stroke::new(3.0, eframe::egui::Color32::from_rgb(30, 42, 54)),
+        Stroke::new(3.0, theme::colors().divider),
     );
 }

@@ -5,7 +5,7 @@ mod macros;
 mod menu;
 mod panels;
 mod recorder_options;
-mod theme;
+pub(crate) mod theme;
 mod tray;
 mod widgets;
 
@@ -41,7 +41,10 @@ pub fn run(backend: Box<dyn AudioBackend>, config_path: PathBuf) -> anyhow::Resu
     let mut config = config::load(&config_path);
     if let Some(preset) = &config.settings.startup_preset {
         match config::load_preset(preset) {
-            Ok(mixer) => config.mixer = mixer,
+            Ok(preset) => {
+                config.mixer = preset.mixer;
+                config.settings.theme = preset.theme;
+            }
             Err(e) => log::warn!("startup preset not loaded: {e:#}"),
         }
     }
@@ -87,7 +90,7 @@ pub fn run(backend: Box<dyn AudioBackend>, config_path: PathBuf) -> anyhow::Resu
         "OpenMeeter",
         options,
         Box::new(|cc| {
-            theme::apply(&cc.egui_ctx);
+            theme::apply(&cc.egui_ctx, config.settings.theme);
             let logo = load_logo(&cc.egui_ctx);
             Ok(Box::new(App::new(&cc.egui_ctx, backend, config, config_path, logo, can_hide)))
         }),
@@ -281,25 +284,25 @@ impl App {
                 p.image(logo.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
             }
             None => {
-                text(&p, o + vec2(10.0, 17.5), Align2::LEFT_CENTER, "OPENMEETER", 14.0, theme::TEXT);
+                text(&p, o + vec2(10.0, 17.5), Align2::LEFT_CENTER, "OPENMEETER", 14.0, theme::colors().text);
             }
         }
 
         let setup_warning = default_output_warning(&self.devices, &self.config.mixer);
         let (message, color) = match (self.problems.first(), &setup_warning, &self.status) {
-            (Some(problem), _, _) => (problem.as_str(), theme::ORANGE),
-            (None, Some(warning), _) => (warning.as_str(), theme::ORANGE),
-            (None, None, Some(status)) => (status.as_str(), theme::TEXT_DIM),
-            (None, None, None) => ("", theme::TEXT_DIM),
+            (Some(problem), _, _) => (problem.as_str(), theme::colors().orange),
+            (None, Some(warning), _) => (warning.as_str(), theme::colors().orange),
+            (None, None, Some(status)) => (status.as_str(), theme::colors().text_dim),
+            (None, None, None) => ("", theme::colors().text_dim),
         };
         let msg_rect = egui::Rect::from_min_max(o + vec2(240.0, 6.0), o + vec2(width - 130.0, 30.0));
         p.with_clip_rect(msg_rect).text(msg_rect.left_center(), Align2::LEFT_CENTER, message, theme::font(12.0), color);
 
         let menu_rect = egui::Rect::from_min_size(o + vec2(width - 116.0, 6.0), vec2(106.0, 24.0));
-        let menu = widgets::button(ui, menu_rect, Id::new("menu"), "Menu", false, theme::TEXT);
+        let menu = widgets::button(ui, menu_rect, Id::new("menu"), "Menu", false, theme::colors().text);
         if self.config.settings.lock_ui {
             let badge = egui::pos2(menu_rect.left() - 10.0, menu_rect.center().y);
-            text(&p, badge, Align2::RIGHT_CENTER, "LOCKED", 12.0, theme::ORANGE);
+            text(&p, badge, Align2::RIGHT_CENTER, "LOCKED", 12.0, theme::colors().orange);
         }
         let state = menu::MenuState {
             settings: &self.config.settings,
@@ -323,8 +326,10 @@ impl App {
             A::LoadSettings => {
                 if let Some(path) = settings_dialog().set_title("Load Settings").pick_file() {
                     match config::load_preset(&path) {
-                        Ok(mixer) => {
-                            self.config.mixer = mixer;
+                        Ok(preset) => {
+                            self.config.mixer = preset.mixer;
+                            settings.theme = preset.theme;
+                            theme::apply(ctx, preset.theme);
                             self.status = Some(format!("Loaded {}", path.display()));
                         }
                         Err(e) => self.status = Some(format!("{e:#}")),
@@ -340,7 +345,7 @@ impl App {
             A::SaveSettings => {
                 let name = format!("OpenMeeter {}.json", chrono::Local::now().format("%Y-%m-%d"));
                 if let Some(path) = settings_dialog().set_title("Save Settings").set_file_name(name).save_file() {
-                    self.status = Some(match config::save_preset(&self.config.mixer, &path) {
+                    self.status = Some(match config::save_preset(&self.config.mixer, settings.theme, &path) {
                         Ok(()) => format!("Saved {}", path.display()),
                         Err(e) => format!("{e:#}"),
                     });
@@ -784,7 +789,7 @@ impl eframe::App for App {
         self.menu_windows(ui.ctx());
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(theme::BG))
+            .frame(egui::Frame::NONE.fill(theme::colors().bg))
             .show(ui, |ui| self.draw(ui));
 
         if self.config.mixer != before {

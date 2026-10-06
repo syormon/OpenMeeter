@@ -55,6 +55,8 @@ enum Command {
     Apps,
     /// Print the config file location.
     ConfigPath,
+    /// Print every theme colour with its default, as JSON for the config file's "theme".
+    Theme,
 }
 
 fn platform_backend() -> anyhow::Result<Box<dyn AudioBackend>> {
@@ -113,6 +115,10 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Meters { seconds }) => cli::meters(backend, &config::load(&config_path), seconds),
         Some(Command::ConfigPath) => {
             println!("{}", config_path.display());
+            Ok(())
+        }
+        Some(Command::Theme) => {
+            println!("{}", ui::theme::Palette::DEFAULT.to_json());
             Ok(())
         }
     }
