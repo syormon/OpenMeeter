@@ -77,8 +77,10 @@ pub(crate) struct DriftResampler {
 }
 
 impl DriftResampler {
-    /// Input frames needed beyond a block's length to interpolate it.
-    pub const LOOKAHEAD: usize = HALF + 1;
+    /// Input frames needed beyond a block's length to interpolate it. One more
+    /// than the kernel reaches: the read position is accumulated frame by frame,
+    /// and rounding may carry it one frame past where [`Self::needed`] predicted.
+    pub const LOOKAHEAD: usize = HALF + 2;
 
     pub fn new() -> Self {
         let mut r = Self { hist: Vec::new(), pos: 0.0 };
@@ -116,7 +118,7 @@ impl DriftResampler {
             return 0;
         }
         let last = self.pos + (frames - 1) as f64 * ratio;
-        (last as usize + HALF + 1).saturating_sub(self.frames())
+        (last as usize + Self::LOOKAHEAD).saturating_sub(self.frames())
     }
 
     /// Space for `frames` more input frames at the end; truncate with [`Self::commit`].
@@ -224,7 +226,7 @@ mod tests {
             fed += need;
             let mut out = vec![0f32; block * CHANNELS];
             r.process(&mut out, 0.999);
-            assert!(r.frames() < TAPS + 4 && r.buffered() < 2.0 && r.buffered() > -2.0 - HALF as f64);
+            assert!(r.frames() < TAPS + 4 && r.buffered() < 3.0 && r.buffered() > -2.0 - HALF as f64);
         }
     }
 }

@@ -96,7 +96,8 @@ impl Player {
             return 0;
         }
         let wanted = out.len() / ENGINE_CHANNELS;
-        let mut pos = (self.position() as usize).min(total);
+        let start = self.position();
+        let mut pos = (start as usize).min(total);
         let mut done = 0;
         while done < wanted {
             if pos >= total {
@@ -115,7 +116,9 @@ impl Player {
         if pos >= total && !self.looping.load(Ordering::Relaxed) {
             self.playing.store(false, Ordering::Relaxed);
         }
-        self.position.store(pos as u64, Ordering::Relaxed);
+        // Advance only if nobody moved the position meanwhile: a seek or stop from
+        // the UI during the copy above must win, not be overwritten.
+        let _ = self.position.compare_exchange(start, pos as u64, Ordering::Relaxed, Ordering::Relaxed);
         done
     }
 }

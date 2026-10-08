@@ -7,6 +7,7 @@ mod config;
 mod autostart;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
+mod logfile;
 mod macros;
 mod model;
 mod recorder;
@@ -53,7 +54,7 @@ enum Command {
     },
     /// List which apps are playing or recording audio on each device (Windows).
     Apps,
-    /// Print the config file location.
+    /// Print the config file location (the app's log, openmeeter.log, is beside it).
     ConfigPath,
     /// Print every theme colour with its default, as JSON for the config file's "theme".
     Theme,
@@ -93,13 +94,16 @@ fn attach_parent_console() {
 
 fn main() -> anyhow::Result<()> {
     attach_parent_console();
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,openmeeter=info")).init();
     let args = Args::parse();
 
     let config_path = match args.config {
         Some(path) => path,
         None => config::default_path(args.mock)?,
     };
+    // The app keeps a log file; one-off commands only print.
+    let log_file = args.command.is_none().then(|| logfile::path_for(&config_path));
+    logfile::init(log_file.as_deref());
+    log::info!("OpenMeeter {} starting", env!("CARGO_PKG_VERSION"));
     let backend = if args.mock { Box::new(MockBackend::new()) } else { platform_backend()? };
     #[cfg(target_os = "linux")]
     if !args.mock {

@@ -34,9 +34,11 @@ impl WindowsBackend {
     }
 
     fn restart(&mut self, topology: Topology) -> Result<()> {
-        // Stop the old engine first so its devices are released.
-        self.host.stop();
+        // List devices before stopping: if that fails, the running engine keeps playing
+        // instead of everything going silent until the next settings change.
         let devices = self.devices()?;
+        // Stop the old engine before starting the new one so its devices are released.
+        self.host.stop();
         // Sources record, sinks play; virtual devices are named by the side apps use,
         // so swap each cable for the side the engine needs.
         let resolve = |nodes: &[(String, Option<DeviceId>)], direction| {

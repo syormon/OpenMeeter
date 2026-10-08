@@ -32,6 +32,10 @@ const ICON_PNG: &[u8] = include_bytes!("../../../../images/icon.png");
 const LOGO_CROP: ([usize; 2], [usize; 2]) = ([96, 240], [852, 540]);
 const LOGO_HEIGHT: f32 = 28.0;
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+/// How often the engine's counters are checked for the log, and how often they
+/// are logged even when nothing changed.
+const STATS_CHECK: Duration = Duration::from_secs(10);
+const STATS_HEARTBEAT: Duration = Duration::from_secs(600);
 /// Auto-restart: how often to look for recovered devices, backing off to the max
 /// while a device keeps failing (e.g. held in exclusive mode by another app).
 const RESTART_CHECK_MIN: Duration = Duration::from_secs(2);
@@ -150,6 +154,10 @@ struct App {
     /// Cached "run on startup" state (read from the system, which owns it).
     run_on_startup: bool,
     next_restart_check: Instant,
+    /// Engine counters as last written to the log, and when to look again.
+    logged_stats: String,
+    next_stats_check: Instant,
+    last_stats_log: Instant,
     restart_backoff: Duration,
     /// False on native Wayland, where closing can't hide to the tray and just quits.
     can_hide: bool,
@@ -185,6 +193,9 @@ impl App {
             quitting: false,
             run_on_startup: crate::autostart::is_enabled(),
             next_restart_check: Instant::now() + RESTART_CHECK_MIN,
+            logged_stats: String::new(),
+            next_stats_check: Instant::now() + STATS_CHECK,
+            last_stats_log: Instant::now(),
             restart_backoff: RESTART_CHECK_MIN,
             can_hide,
         };
@@ -398,7 +409,28 @@ impl App {
         }
     }
 
+    /// Write the engine's counters (underruns, skipped backlog, device errors) to
+    /// the log when they change, so a glitch can be traced afterwards.
+    fn log_engine_stats(&mut self) {
+        if Instant::now() < self.next_stats_check {
+            return;
+        }
+        self.next_stats_check = Instant::now() + STATS_CHECK;
+        let stats = self.backend.stats();
+        // The drift reading always moves; only the counters and errors count as news.
+        let counters = |line: &String| line.split(", ").filter(|part| !part.starts_with("clock drift")).collect::<Vec<_>>().join(", ");
+        let mut errors: Vec<String> = self.backend.node_errors().into_iter().map(|(key, e)| format!("{key}: {e}")).collect();
+        errors.sort();
+        let news = stats.iter().map(counters).chain(errors).collect::<Vec<_>>().join(" | ");
+        if news != self.logged_stats || self.last_stats_log.elapsed() >= STATS_HEARTBEAT {
+            log::info!("audio: {}", stats.join(" | "));
+            self.logged_stats = news;
+            self.last_stats_log = Instant::now();
+        }
+    }
+
     fn restart_engine(&mut self) {
+        log::info!("restarting the audio engine");
         self.refresh_devices();
         self.backend.restart_engine();
         self.apply();
@@ -776,6 +808,7 @@ impl eframe::App for App {
         self.tray_and_close(ctx);
         // Hotkeys and the clips they load must work while the window is hidden.
         self.poll_hotkeys();
+        self.log_engine_stats();
         self.recorder.poll(&mut *self.backend, &self.config.mixer.recorder);
         if self.recorder.is_loading() {
             ctx.request_repaint_after(Duration::from_millis(50));

@@ -9,7 +9,13 @@
 //! Devices never share a clock exactly, so each sink keeps every ring near
 //! [`Params::target_frames`] by resampling each source at a rate a few ppm off 1.0,
 //! steered by the smoothed fill level (see [`crate::resample`]). No sample is ever
-//! dropped or repeated, which would be audible as grain on bright material.
+//! dropped or repeated for drift, which would be audible as grain on bright material.
+//!
+//! The rate correction is deliberately gentle, so it can't clear a backlog: when a
+//! sink's thread is held up (a busy system) while a source keeps delivering, the
+//! extra audio would leave that sink playing late for a minute, out of step with
+//! every other output. A sustained backlog is therefore skipped in one go, with a
+//! short fade either side of the cut (see `SNAP_FADE_FRAMES`).
 //!
 //! Gains, mutes and routes live in [`Params`] as atomics, so changing them never
 //! restarts a stream. Device access is the platform's job, through [`DeviceIo`].
@@ -51,6 +57,11 @@ const MAX_DRIFT: f64 = 2e-3;
 /// Backlog beyond the target (130 ms) that is dropped outright, e.g. audio queued
 /// before the sink started.
 const EMERGENCY_EXTRA_FRAMES: usize = 6240;
+/// Smallest sustained backlog (10 ms) that is skipped rather than left to the rate
+/// correction; see [`Params::snap_frames`].
+const MIN_SNAP_FRAMES: usize = 480;
+/// Fade out before and in after a skip, so the cut is a soft dip rather than a click.
+const SNAP_FADE_FRAMES: usize = 64;
 const RING_FRAMES: usize = 24_000;
 /// Longest output delay (Monitoring Synchro Delay): one second.
 pub const MAX_DELAY_FRAMES: usize = SAMPLE_RATE;
@@ -211,6 +222,12 @@ impl Params {
         self.target_frames as f32 / 4.0
     }
 
+    /// Sustained backlog above the target that is skipped in one go: half the
+    /// target, but no less than normal block-to-block jitter can reach.
+    fn snap_frames(&self) -> f32 {
+        (self.target_frames / 2).max(MIN_SNAP_FRAMES) as f32
+    }
+
     pub fn set_route(&self, source: usize, sink: usize, on: bool) {
         self.routes[source * self.sinks.len() + sink].store(on, Ordering::Relaxed);
     }
@@ -314,6 +331,8 @@ struct SourceReader {
     /// Snaps left in this warm-up.
     warmup_snaps: u8,
     resampler: DriftResampler,
+    /// Fade the next block in: it follows a gap or a skip.
+    fade_in: bool,
     /// Fed by a device with its own clock. The file player isn't: it tops the ring
     /// up on demand, so it's played as-is with no drift correction or backlog skipping.
     clocked: bool,
@@ -321,7 +340,36 @@ struct SourceReader {
 
 impl SourceReader {
     fn new(source: usize, ring: Consumer<f32>, clocked: bool) -> Self {
-        Self { source, ring, primed: false, fill_avg: 0.0, warmup_frames: 0, warmup_snaps: 0, resampler: DriftResampler::new(), clocked }
+        Self { source, ring, primed: false, fill_avg: 0.0, warmup_frames: 0, warmup_snaps: 0, resampler: DriftResampler::new(), fade_in: false, clocked }
+    }
+
+    /// Discard `frames` of queued audio. What follows doesn't continue what was
+    /// playing, so the resampler starts afresh and the next block fades in.
+    fn skip(&mut self, frames: usize, stats: &NodeParams) -> bool {
+        let Ok(chunk) = self.ring.read_chunk(frames * CHANNELS) else { return false };
+        chunk.commit_all();
+        stats.dropped_frames.fetch_add(frames as u64, Ordering::Relaxed);
+        self.resampler.reset();
+        self.fade_in = true;
+        true
+    }
+}
+
+/// Ramp the first frames of `block` up from silence.
+fn fade_in(block: &mut [f32]) {
+    let frames = (block.len() / CHANNELS).min(SNAP_FADE_FRAMES);
+    for (i, frame) in block.as_chunks_mut::<CHANNELS>().0.iter_mut().take(frames).enumerate() {
+        let gain = i as f32 / frames as f32;
+        frame.iter_mut().for_each(|x| *x *= gain);
+    }
+}
+
+/// Ramp the last frames of `block` down to silence.
+fn fade_out(block: &mut [f32]) {
+    let frames = (block.len() / CHANNELS).min(SNAP_FADE_FRAMES);
+    for (i, frame) in block.as_chunks_mut::<CHANNELS>().0.iter_mut().rev().take(frames).enumerate() {
+        let gain = i as f32 / frames as f32;
+        frame.iter_mut().for_each(|x| *x *= gain);
     }
 }
 
@@ -384,11 +432,9 @@ impl RenderStream {
             let target_frames = params.target_frames;
             if buffered > target_frames + EMERGENCY_EXTRA_FRAMES {
                 // A large backlog (e.g. queued before we started): skip to the target.
-                let excess = buffered - target_frames;
-                if let Ok(chunk) = input.ring.read_chunk(excess * CHANNELS) {
-                    chunk.commit_all();
-                    stats.dropped_frames.fetch_add(excess as u64, Ordering::Relaxed);
+                if input.skip(buffered - target_frames, stats) {
                     buffered = target_frames;
+                    input.fill_avg = target_frames as f32;
                 }
             }
             if !input.primed {
@@ -412,6 +458,7 @@ impl RenderStream {
                 input.primed = true;
                 input.fill_avg = buffered as f32;
                 input.resampler.reset();
+                input.fade_in = true;
                 // Re-buffering during a warm-up continues it rather than starting another.
                 if input.warmup_frames == 0 {
                     input.warmup_frames = WARMUP_FRAMES;
@@ -429,10 +476,7 @@ impl RenderStream {
                 if input.warmup_snaps > 0 {
                     if input.fill_avg > target + band && buffered > target_frames {
                         // A sustained backlog: skip it in one go.
-                        let excess = buffered - target_frames;
-                        if let Ok(chunk) = input.ring.read_chunk(excess * CHANNELS) {
-                            chunk.commit_all();
-                            stats.dropped_frames.fetch_add(excess as u64, Ordering::Relaxed);
+                        if input.skip(buffered - target_frames, stats) {
                             input.fill_avg = target;
                             input.warmup_snaps -= 1;
                         }
@@ -446,6 +490,10 @@ impl RenderStream {
             } else if input.clocked {
                 input.fill_avg += (buffered_total - input.fill_avg) * FILL_SMOOTHING;
             }
+            // A backlog the rate correction would take most of a minute to drain
+            // (this sink was held up while the source kept delivering): play this
+            // block out, fading, then skip to the target.
+            let snap = input.clocked && input.warmup_frames == 0 && input.fill_avg > target + params.snap_frames();
 
             // Drift correction: consume input slightly faster (source fast, fill above
             // target) or slower than we play it.
@@ -466,6 +514,18 @@ impl RenderStream {
             }
             let out = &mut self.scratch[..n];
             input.resampler.process(out, ratio);
+            if std::mem::take(&mut input.fade_in) {
+                fade_in(out);
+            }
+            if snap {
+                fade_out(out);
+                // Leave what a block needs once the next delivery arrives.
+                let keep = target_frames.max(frames + DriftResampler::LOOKAHEAD).saturating_sub(frames);
+                let queued = input.ring.slots() / CHANNELS;
+                if queued > keep && input.skip(queued - keep, stats) {
+                    input.fill_avg = target;
+                }
+            }
             if params.route(input.source, k) {
                 for (o, x) in mix.iter_mut().zip(out.iter()) {
                     *o += *x;
@@ -535,7 +595,8 @@ impl Engine {
                 SourceSpec::Device(device) => {
                     let (io, device) = (io.clone(), device.clone());
                     let stream = CaptureStream { index: s, outs, state: state(&ready_tx) };
-                    threads.push(spawn(format!("capture-{s}"), move || io.capture(&device, stream)));
+                    let params = params.clone();
+                    threads.push(spawn(format!("capture-{s}"), move || guarded(&params.sources[s], || io.capture(&device, stream))));
                     expected += 1;
                 }
                 SourceSpec::Player(player) => {
@@ -555,8 +616,8 @@ impl Engine {
                 scratch: Vec::new(),
                 state: state(&ready_tx),
             };
-            let io = io.clone();
-            threads.push(spawn(format!("render-{k}"), move || io.render(&device, stream)));
+            let (io, params) = (io.clone(), params.clone());
+            threads.push(spawn(format!("render-{k}"), move || guarded(&params.sinks[k], || io.render(&device, stream))));
             expected += 1;
         }
         drop(ready_tx);
@@ -582,6 +643,15 @@ impl Drop for Engine {
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
+    }
+}
+
+/// Run a device's audio loop. If it panics, report that on the node like any other
+/// device failure (so it shows in the UI and auto-restart can act) instead of
+/// leaving the stream silently dead.
+fn guarded(node: &NodeParams, audio_loop: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(audio_loop)).is_err() {
+        node.fail("the audio thread crashed; restart the audio engine (Menu)".into());
     }
 }
 
@@ -947,6 +1017,57 @@ mod tests {
         }
         // Before, every prime left too little for such a block: it underran forever and played nothing.
         assert!(played >= 10, "played {played} of 20 blocks");
+    }
+
+    /// A sink with one clocked source, fed and drained by hand.
+    fn manual_sink(target: usize) -> (Arc<Params>, Producer<f32>, RenderStream) {
+        let params = Arc::new(Params::new(1, 1, target));
+        params.set_route(0, 0, true);
+        params.sinks[0].set(0.0, false, false, false);
+        let (tx, rx) = RingBuffer::new(RING_FRAMES * CHANNELS);
+        let state = StreamState { params: params.clone(), running: Arc::new(AtomicBool::new(true)), ready: None };
+        let delay_line = vec![0.0; (MAX_DELAY_FRAMES + 1) * CHANNELS];
+        let stream = RenderStream { index: 0, ins: vec![SourceReader::new(0, rx, true)], delay_line, delay_pos: 0, scratch: Vec::new(), state };
+        (params, tx, stream)
+    }
+
+    #[test]
+    fn a_crashed_audio_thread_is_reported_on_its_node() {
+        let node = NodeParams::default();
+        guarded(&node, || {});
+        assert_eq!(node.error(), None);
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // keep the expected panic out of the test output
+        guarded(&node, || panic!("boom"));
+        std::panic::set_hook(hook);
+        assert!(node.error().is_some_and(|e| e.contains("crashed")));
+    }
+
+    #[test]
+    fn a_backlog_after_a_stall_is_cleared_quickly() {
+        // The sink's thread stalls for 100 ms while the source keeps delivering:
+        // 4800 extra frames queue up. Left to the rate correction alone (0.2 %)
+        // they'd take about a minute to drain, and that output would play late
+        // (an echo against any other output) the whole time.
+        let (params, mut tx, mut stream) = manual_sink(960);
+        let block = vec![0.25f32; 480 * CHANNELS];
+        let mut mix = vec![0f32; 480 * CHANNELS];
+        let mut run = |tx: &mut Producer<f32>, stream: &mut RenderStream, blocks: usize| {
+            for _ in 0..blocks {
+                tx.push_entire_slice(&block).unwrap();
+                stream.fill(&mut mix);
+            }
+            stream.ins[0].ring.slots() / CHANNELS
+        };
+        let settled = run(&mut tx, &mut stream, 300); // 3 s: well past the warm-up
+        assert!(settled <= 960, "steady state holds about the target: {settled}");
+
+        for _ in 0..10 {
+            tx.push_entire_slice(&block).unwrap(); // the stall
+        }
+        let late = run(&mut tx, &mut stream, 200); // 2 s later
+        assert!(late <= 960 + 480, "backlog still {late} frames 2 s after a stall");
+        assert_eq!(params.sinks[0].underruns.load(Ordering::Relaxed), 0);
     }
 
     #[test]
