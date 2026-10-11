@@ -21,7 +21,7 @@ use crate::config::{self, AutoRestart, Config};
 use crate::recorder::{self, Recorder};
 use panels::RecorderAction;
 use crate::model::{Kind, Mixer};
-use panels::{Ctx, DESIGN_H, HW_STRIP_W, RIGHT_W, TITLE_H, VIRT_STRIP_W};
+use panels::{Ctx, DESIGN_H, HW_STRIP_W, TITLE_H, VIRT_STRIP_W};
 use widgets::text;
 
 const METER_FPS: u64 = 60;
@@ -126,7 +126,7 @@ fn load_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
 
 /// Size of the design grid for a given strip/bus layout.
 fn design_size(mixer: &Mixer) -> egui::Vec2 {
-    vec2(strips_width(mixer) + RIGHT_W, DESIGN_H)
+    vec2(strips_width(mixer) + panels::right_width(mixer.buses.len()), DESIGN_H)
 }
 
 fn strips_width(mixer: &Mixer) -> f32 {
@@ -383,6 +383,7 @@ impl App {
             A::OpenSystemSettings => self.windows.system_settings = true,
             A::OpenRecorderOptions => self.windows.recorder_options = true,
             A::OpenMacros => self.macros_ui.open = true,
+            A::OpenLayout => self.windows.layout = true,
             A::RefreshDevices => self.refresh_devices(),
             A::ShutDown => {
                 self.quitting = true;
@@ -527,6 +528,16 @@ impl App {
         if let Some(i) = macros::window(ctx, &mut self.macros_ui, &mut self.config.settings.macros, &info) {
             self.run_macro(i);
         }
+        if let Some(layout) = menu::layout_window(ctx, &mut self.windows.layout, self.config.mixer.layout()) {
+            // Keep the current scale: resize the window to the new layout's size.
+            let before = design_size(&self.config.mixer);
+            self.config.mixer.set_layout(layout);
+            let after = design_size(&self.config.mixer);
+            if after != before {
+                ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(after * 0.6 / ctx.zoom_factor()));
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(after));
+            }
+        }
         if self.windows.confirm_reset
             && let Some(reset) = menu::confirm_reset(ctx)
         {
@@ -626,9 +637,14 @@ impl App {
                     }
                 }
                 // Between two virtual strips the line starts below their shared title.
-                let inside_group = kinds.get(i + 1) == Some(&Kind::Virtual) && strip.kind == Kind::Virtual;
+                let next_is_virtual = kinds.get(i + 1) == Some(&Kind::Virtual);
+                let inside_group = next_is_virtual && strip.kind == Kind::Virtual;
                 let top = if inside_group { panels::GROUP_SEPARATOR_TOP } else { TITLE_H + 4.0 };
-                edges.push((x, top));
+                // Where the hardware inputs end and the virtual ones begin, a heavy
+                // divider replaces the thin line.
+                if !(next_is_virtual && strip.kind == Kind::Hardware) {
+                    edges.push((x, top));
+                }
             }
             if let Some(start) = virt_start {
                 panels::virtual_inputs_title(ui, o, start, x - start);
@@ -638,7 +654,9 @@ impl App {
             panels::hardware_out_header(ui, o, x, &mut mixer.buses, &ctx);
             let recorder_action = panels::recorder(ui, o, x, &mut mixer.recorder, &bus_keys, &recorder_display);
             panels::master_section(ui, o, x, &mut mixer.buses, &ctx);
-            panels::separators(ui, o, &edges, x);
+            // No divider if the virtual inputs come first (there's nothing to their left).
+            let group_x = virt_start.filter(|&start| start > 0.0);
+            panels::separators(ui, o, &edges, group_x, x);
             recorder_action
         })
         .inner;

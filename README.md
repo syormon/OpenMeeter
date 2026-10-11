@@ -14,6 +14,7 @@ A Voicemeeter-style audio mixer for Windows and Linux. Windows requires `VB-Cabl
 - [x] Windows: outputs play in raw mode, bypassing device effects (Realtek "enhancements", virtual surround, loudness) without taking the device exclusively
 - [x] Macro buttons: global hotkeys (e.g. Ctrl+F12, Numpad7) to restart the engine, play a sound clip, stop playback, start/stop recording or toggle a mute (X11 only on Linux)
 - [x] Custom colour themes from the config file (see [Theming](#theming))
+- [x] Adjustable mixer layout: 1-8 hardware inputs, 0-4 virtual inputs, 1-5 hardware outputs, 0-3 virtual outputs (Menu > Mixer Layout; 3 / 2 / 3 / 2 by default)
 - [ ] MIDI mapping, VBAN
 - [x] Linux backend: device enumeration, virtual inputs/buses created on demand, mixing engine,
       meters, recorder and player, feedback guard, unplug detection, real-time audio threads, tray icon

@@ -7,7 +7,7 @@ use openmeeter_backend::{DeviceId, DeviceInfo, StreamInfo};
 
 use super::theme;
 use crate::config::{AppSettings, AutoRestart};
-use crate::model::{Kind, MAX_BUS_DELAY_MS, Mixer};
+use crate::model::{Kind, Layout, MAX_BUS_DELAY_MS, Mixer};
 
 pub enum MenuAction {
     RestartEngine,
@@ -26,6 +26,7 @@ pub enum MenuAction {
     OpenSystemSettings,
     OpenRecorderOptions,
     OpenMacros,
+    OpenLayout,
     RefreshDevices,
     ShutDown,
 }
@@ -36,6 +37,22 @@ pub struct MenuState<'a> {
     pub run_on_startup: bool,
     pub tray_available: bool,
     pub cassette_loaded: bool,
+}
+
+/// A "- 3 +" row for one count of the mixer layout. Returns the new count when changed.
+fn stepper(ui: &mut Ui, label: &str, value: usize, range: std::ops::RangeInclusive<usize>) -> Option<usize> {
+    let mut changed = None;
+    ui.horizontal(|ui| {
+        ui.add_sized([130.0, 18.0], egui::Label::new(label).halign(egui::Align::Min));
+        if ui.add_enabled(value > *range.start(), egui::Button::new("  -  ")).clicked() {
+            changed = Some(value - 1);
+        }
+        ui.add_sized([22.0, 18.0], egui::Label::new(RichText::new(value.to_string()).strong()));
+        if ui.add_enabled(value < *range.end(), egui::Button::new("  +  ")).clicked() {
+            changed = Some(value + 1);
+        }
+    });
+    changed
 }
 
 /// Voicemeeter-style check item: a checkbox that reports the new state.
@@ -90,6 +107,9 @@ pub fn contents(ui: &mut Ui, state: &MenuState) -> Option<MenuAction> {
     if ui.button("Reset Settings (Re-Initialization)...").clicked() {
         pick(A::ResetSettings);
     }
+    if ui.button("Mixer Layout (Inputs / Outputs)...").clicked() {
+        pick(A::OpenLayout);
+    }
     ui.separator();
 
     let tray = ui.add_enabled_ui(state.tray_available, |ui| check(ui, s.tray && state.tray_available, "System Tray")).inner;
@@ -136,6 +156,7 @@ pub fn contents(ui: &mut Ui, state: &MenuState) -> Option<MenuAction> {
 pub struct Windows {
     pub system_settings: bool,
     pub recorder_options: bool,
+    pub layout: bool,
     pub confirm_reset: bool,
 }
 
@@ -311,6 +332,44 @@ fn cell(ui: &mut Ui, width: f32, text: RichText) -> egui::Response {
 }
 
 /// Confirmation for Reset Settings. Returns Some(true) to reset, Some(false) to cancel.
+/// The Mixer Layout window: how many strips and buses there are.
+/// Returns the layout the user asked for when they change it.
+pub fn layout_window(ctx: &egui::Context, open: &mut bool, layout: Layout) -> Option<Layout> {
+    let mut wanted = None;
+    let frame = egui::Frame::window(&ctx.global_style()).fill(theme::colors().bg).stroke(egui::Stroke::new(1.0, theme::colors().panel_stroke));
+    egui::Window::new("Mixer Layout")
+        .open(open)
+        .frame(frame)
+        .resizable(false)
+        .collapsible(false)
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.content_rect().center())
+        .constrain(true)
+        .show(ctx, |ui| {
+            let l = layout;
+            if let Some(n) = stepper(ui, "Hardware Inputs", l.hw_in, Layout::HW_IN) {
+                wanted = Some(Layout { hw_in: n, ..l });
+            }
+            if let Some(n) = stepper(ui, "Virtual Inputs", l.virt_in, Layout::VIRT_IN) {
+                wanted = Some(Layout { virt_in: n, ..l });
+            }
+            if let Some(n) = stepper(ui, "Hardware Outputs", l.hw_out, Layout::HW_OUT) {
+                wanted = Some(Layout { hw_out: n, ..l });
+            }
+            if let Some(n) = stepper(ui, "Virtual Outputs", l.virt_out, Layout::VIRT_OUT) {
+                wanted = Some(Layout { virt_out: n, ..l });
+            }
+            ui.add_space(4.0);
+            ui.label(RichText::new("Removing a strip or bus discards its settings.").small().color(theme::colors().text_dim));
+            let d = Layout::DEFAULT;
+            let back = format!("Back to the default ({} / {} / {} / {})", d.hw_in, d.virt_in, d.hw_out, d.virt_out);
+            if ui.add_enabled(l != d, egui::Button::new(back)).clicked() {
+                wanted = Some(d);
+            }
+        });
+    wanted
+}
+
 pub fn confirm_reset(ctx: &egui::Context) -> Option<bool> {
     let modal = egui::Modal::new(egui::Id::new("confirm-reset")).show(ctx, |ui| {
         ui.set_width(320.0);

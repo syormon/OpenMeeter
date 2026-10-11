@@ -379,9 +379,10 @@ impl FillWindow {
 
     /// `frames` were just skipped: every level seen would have been that much lower.
     fn lower(&mut self, frames: usize) {
-        let shift = |(low, high): (usize, usize)| (low.saturating_sub(frames), high.saturating_sub(frames));
-        self.current = shift(self.current);
-        self.previous = self.previous.map(shift);
+        for (low, high) in std::iter::once(&mut self.current).chain(&mut self.previous) {
+            *low = low.saturating_sub(frames);
+            *high = high.saturating_sub(frames);
+        }
     }
 }
 

@@ -24,13 +24,36 @@ const HEADER_NAME_H: f32 = 30.0;
 pub const GROUP_SEPARATOR_TOP: f32 = 59.0;
 pub const HW_STRIP_W: f32 = 160.0;
 pub const VIRT_STRIP_W: f32 = 112.0;
-pub const RIGHT_W: f32 = 320.0;
+/// Width of the right-hand pane (outputs, recorder, master section) with the
+/// default five buses; each bus beyond that adds a master column.
+const RIGHT_W: f32 = 320.0;
+const MASTER_COLUMN_W: f32 = 61.6;
 pub const DESIGN_H: f32 = 620.0;
 
 const BTN_H: f32 = 25.0;
-/// y positions of the strip button column: A1..A3, B1..B2, then three extras.
-const ROUTE_Y: [f32; 5] = [348.0, 377.0, 406.0, 440.0, 469.0];
+/// The strip button column: bus buttons (A1.., then B1.. after a small gap) from
+/// `ROUTE_TOP`, the last one starting no lower than `ROUTE_LAST`; then three extras.
+const ROUTE_TOP: f32 = 348.0;
+const ROUTE_LAST: f32 = 478.0;
+const ROUTE_PITCH: f32 = 29.0;
+const ROUTE_GROUP_GAP: f32 = 5.0;
 const EXTRA_Y: [f32; 3] = [507.0, 540.0, 571.0];
+
+/// Width of the right-hand pane for a mixer with `buses` buses.
+pub fn right_width(buses: usize) -> f32 {
+    RIGHT_W.max(12.0 + buses as f32 * MASTER_COLUMN_W)
+}
+
+/// `(y, height)` of each button in a column of `n` between `top` and `last` (the
+/// lowest a button may start): `pitch` apart and `height` tall when they fit,
+/// closer and shorter when they don't. `gap_before` adds a gap before that button.
+fn column(n: usize, top: f32, last: f32, pitch: f32, height: f32, gap_before: Option<usize>, gap: f32) -> Vec<(f32, f32)> {
+    let gap = if gap_before.is_some_and(|i| i > 0 && i < n) { gap } else { 0.0 };
+    let fitted = if n > 1 { (last - top - gap) / (n - 1) as f32 } else { pitch };
+    let pitch = pitch.min(fitted);
+    let height = height.min(pitch - 3.0);
+    (0..n).map(|i| (top + i as f32 * pitch + if gap_before.is_some_and(|g| i >= g) { gap } else { 0.0 }, height)).collect()
+}
 const FADER_TOP: f32 = 346.0;
 
 pub struct Ctx<'a> {
@@ -157,10 +180,13 @@ fn candidates<'a>(ctx: &'a Ctx, direction: Direction, is_virtual: bool) -> impl 
 }
 
 fn route_buttons(ui: &mut Ui, o: Pos2, x: f32, w: f32, strip: &mut Strip, bus_keys: &[String]) {
-    for (key, y) in bus_keys.iter().zip(ROUTE_Y) {
+    // Hardware buses first, then the virtual ones (keys B1..) after a small gap.
+    let first_virtual = bus_keys.iter().position(|key| key.starts_with('B'));
+    let slots = column(bus_keys.len(), ROUTE_TOP, ROUTE_LAST, ROUTE_PITCH, BTN_H, first_virtual, ROUTE_GROUP_GAP);
+    for (key, (y, h)) in bus_keys.iter().zip(slots) {
         let on = strip.routes.contains(key);
         let id = Id::new(("route", &strip.key, key));
-        if route_button(ui, r(o, x, y, w, BTN_H), id, key, on).clicked() {
+        if route_button(ui, r(o, x, y, w, h), id, key, on).clicked() {
             if on {
                 strip.routes.remove(key);
             } else {
@@ -306,11 +332,14 @@ pub fn virtual_strip(ui: &mut Ui, o: Pos2, x: f32, j: usize, strip: &mut Strip, 
 
 pub fn virtual_inputs_title(ui: &Ui, o: Pos2, x: f32, w: f32) {
     let p = ui.painter();
-    text(p, o + vec2(x + w / 2.0, HEADER_TITLE_Y), Align2::CENTER_CENTER, "VIRTUAL INPUTS", 15.0, theme::colors().text);
+    // A single strip is too narrow for the plural.
+    let title = if w > VIRT_STRIP_W { "VIRTUAL INPUTS" } else { "VIRTUAL INPUT" };
+    text(p, o + vec2(x + w / 2.0, HEADER_TITLE_Y), Align2::CENTER_CENTER, title, 15.0, theme::colors().text);
 }
 
 /// A1..An device selectors and the "HARDWARE OUT" device list.
 pub fn hardware_out_header(ui: &mut Ui, o: Pos2, x: f32, buses: &mut [crate::model::Bus], ctx: &Ctx) {
+    let right_w = right_width(buses.len());
     let p = ui.painter().clone();
     let hw: Vec<_> = buses.iter_mut().filter(|b| b.kind == Kind::Hardware).collect();
     let n = hw.len();
@@ -341,7 +370,7 @@ pub fn hardware_out_header(ui: &mut Ui, o: Pos2, x: f32, buses: &mut [crate::mod
 
     let text_x = x + 16.0 + n as f32 * 32.0;
     text(&p, o + vec2(text_x, 50.0), Align2::LEFT_CENTER, "HARDWARE OUT", 15.0, theme::colors().text);
-    let list = r(o, text_x, 60.0, RIGHT_W - (text_x - x) - 6.0, 32.0);
+    let list = r(o, text_x, 60.0, right_w - (text_x - x) - 6.0, 32.0);
     let clipped = p.with_clip_rect(list);
     for (i, (line, color)) in names.iter().take(3).enumerate() {
         clipped.text(list.left_top() + vec2(0.0, i as f32 * 10.5), Align2::LEFT_TOP, line, theme::font(10.0), *color);
@@ -441,8 +470,9 @@ pub fn recorder(
     }
 
     // Where playback goes (Voicemeeter's recorder buttons).
-    for (i, key) in bus_keys.iter().enumerate() {
-        let b = r(o, x + 262.0, 112.0 + i as f32 * 31.0, 44.0, 26.0);
+    let slots = column(bus_keys.len(), 112.0, 236.0, 31.0, 26.0, None, 0.0);
+    for (key, (y, h)) in bus_keys.iter().zip(slots) {
+        let b = r(o, x + 262.0, y, 44.0, h);
         let on = settings.playback_buses.contains(key);
         let resp = button(ui, b, Id::new(("rec-out", key)), key, on, theme::colors().green);
         if resp.on_hover_text(format!("Play loaded files into {key}")).clicked() {
@@ -511,12 +541,13 @@ fn transport_icon(p: &eframe::egui::Painter, c: Pos2, icon: TransportIcon) {
 
 pub fn master_section(ui: &mut Ui, o: Pos2, x: f32, buses: &mut [crate::model::Bus], ctx: &Ctx) {
     let p = ui.painter().clone();
-    text(&p, o + vec2(x + RIGHT_W / 2.0, 290.0), Align2::CENTER_CENTER, "MASTER SECTION", 15.0, theme::colors().text);
+    let right_w = right_width(buses.len());
+    text(&p, o + vec2(x + right_w / 2.0, 290.0), Align2::CENTER_CENTER, "MASTER SECTION", 15.0, theme::colors().text);
     let line = Stroke::new(1.0, theme::colors().separator);
     p.line_segment([o + vec2(x + 8.0, 290.0), o + vec2(x + 90.0, 290.0)], line);
-    p.line_segment([o + vec2(x + RIGHT_W - 90.0, 290.0), o + vec2(x + RIGHT_W - 8.0, 290.0)], line);
+    p.line_segment([o + vec2(x + right_w - 90.0, 290.0), o + vec2(x + right_w - 8.0, 290.0)], line);
 
-    let col_w = (RIGHT_W - 12.0) / buses.len().max(1) as f32;
+    let col_w = (right_w - 12.0) / buses.len().max(1) as f32;
     let mut physical_end = x + 6.0;
     for (i, bus) in buses.iter_mut().enumerate() {
         let cx = x + 6.0 + i as f32 * col_w;
@@ -602,19 +633,21 @@ pub fn master_section(ui: &mut Ui, o: Pos2, x: f32, buses: &mut [crate::model::B
         p.line_segment([pos2(t.right() + 4.0, t.center().y), o + vec2(x1 - 4.0, y)], line);
     };
     caption(x + 6.0, physical_end, "PHYSICAL");
-    caption(physical_end, x + RIGHT_W - 6.0, "VIRTUAL");
+    caption(physical_end, x + right_w - 6.0, "VIRTUAL");
     vline(ui, o, physical_end, 300.0, 604.0);
 }
 
 /// Separators between sections. `strip_edges` are `(x, top)` pairs.
-pub fn separators(ui: &Ui, o: Pos2, strip_edges: &[(f32, f32)], right_x: f32) {
+/// The lines between strips. `strip_edges` are `(x, top)` of the thin ones;
+/// `group_x` is where the virtual inputs begin (if both kinds of input exist) and
+/// `right_x` where the right-hand pane begins: those two get the heavy divider.
+pub fn separators(ui: &Ui, o: Pos2, strip_edges: &[(f32, f32)], group_x: Option<f32>, right_x: f32) {
     let p = ui.painter();
     p.line_segment([o + vec2(0.0, HEADER_BOTTOM), o + vec2(right_x, HEADER_BOTTOM)], Stroke::new(1.0, theme::colors().separator));
     for &(x, top) in strip_edges {
         vline(ui, o, x, top, DESIGN_H - 4.0);
     }
-    p.line_segment(
-        [o + vec2(right_x, TITLE_H), o + vec2(right_x, DESIGN_H)],
-        Stroke::new(3.0, theme::colors().divider),
-    );
+    for x in group_x.into_iter().chain([right_x]) {
+        p.line_segment([o + vec2(x, TITLE_H), o + vec2(x, DESIGN_H)], Stroke::new(3.0, theme::colors().divider));
+    }
 }

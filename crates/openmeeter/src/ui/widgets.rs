@@ -33,7 +33,9 @@ pub fn button(ui: &mut Ui, rect: Rect, id: Id, label: &str, on: bool, accent: Co
     let resp = ui.interact(rect, id, Sense::click());
     paint_button(ui, rect, &resp, on, accent);
     let color = if on { accent } else { theme::colors().text_dim };
-    text_lines_centered(ui.painter(), rect.center(), label, 13.0, color);
+    // Buttons squeezed into a crowded column get a smaller label.
+    let size = (rect.height() * 0.6).clamp(10.0, 13.0);
+    text_lines_centered(ui.painter(), rect.center(), label, size, color);
     resp
 }
 
@@ -62,7 +64,8 @@ pub fn route_button(ui: &mut Ui, rect: Rect, id: Id, bus: &str, on: bool) -> Res
         color,
         Stroke::NONE,
     ));
-    text(painter, pos2(c.x + 4.0, c.y), Align2::CENTER_CENTER, bus, 14.0, color);
+    let size = (rect.height() * 0.62).clamp(10.0, 14.0);
+    text(painter, pos2(c.x + 4.0, c.y), Align2::CENTER_CENTER, bus, size, color);
     resp
 }
 

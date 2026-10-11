@@ -266,10 +266,41 @@ impl RecordFormat {
     }
 }
 
+/// How many strips and buses of each kind the mixer has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Layout {
+    pub hw_in: usize,
+    pub virt_in: usize,
+    pub hw_out: usize,
+    pub virt_out: usize,
+}
+
+impl Layout {
+    /// Voicemeeter Banana's.
+    pub const DEFAULT: Layout = Layout { hw_in: 3, virt_in: 2, hw_out: 3, virt_out: 2 };
+    /// What the window lays out sensibly (Voicemeeter Potato has 5 + 3 inputs and
+    /// A1-A5 + B1-B3; more buses than that don't fit a strip's button column).
+    pub const HW_IN: std::ops::RangeInclusive<usize> = 1..=8;
+    pub const VIRT_IN: std::ops::RangeInclusive<usize> = 0..=4;
+    pub const HW_OUT: std::ops::RangeInclusive<usize> = 1..=5;
+    pub const VIRT_OUT: std::ops::RangeInclusive<usize> = 0..=3;
+
+    fn clamped(self) -> Layout {
+        let clamp = |n: usize, range: std::ops::RangeInclusive<usize>| n.clamp(*range.start(), *range.end());
+        Layout {
+            hw_in: clamp(self.hw_in, Self::HW_IN),
+            virt_in: clamp(self.virt_in, Self::VIRT_IN),
+            hw_out: clamp(self.hw_out, Self::HW_OUT),
+            virt_out: clamp(self.virt_out, Self::VIRT_OUT),
+        }
+    }
+}
+
 impl Default for Mixer {
     /// Voicemeeter Banana layout: 3 hardware + 2 virtual inputs, A1-A3 + B1-B2.
     fn default() -> Self {
-        Self::with_layout(3, 2, 3, 2)
+        let Layout { hw_in, virt_in, hw_out, virt_out } = Layout::DEFAULT;
+        Self::with_layout(hw_in, virt_in, hw_out, virt_out)
     }
 }
 
@@ -337,6 +368,33 @@ impl Mixer {
             .chain((1..=virt_out).map(|i| bus(format!("B{i}"), Kind::Virtual)))
             .collect();
         Self { strips, buses, recorder: RecorderSettings::default() }
+    }
+
+    pub fn layout(&self) -> Layout {
+        let strips = |kind| self.strips.iter().filter(|s| s.kind == kind).count();
+        let buses = |kind| self.buses.iter().filter(|b| b.kind == kind).count();
+        Layout { hw_in: strips(Kind::Hardware), virt_in: strips(Kind::Virtual), hw_out: buses(Kind::Hardware), virt_out: buses(Kind::Virtual) }
+    }
+
+    /// Change how many strips and buses there are. Those that remain keep
+    /// their settings, new ones start from the defaults, and anything pointing at a
+    /// removed bus or strip (routes, recorder arming) is dropped.
+    pub fn set_layout(&mut self, layout: Layout) {
+        let layout = layout.clamped();
+        let fresh = Mixer::with_layout(layout.hw_in, layout.virt_in, layout.hw_out, layout.virt_out);
+        let strips = fresh.strips.into_iter().map(|new| self.strips.iter().find(|s| s.key == new.key).cloned().unwrap_or(new)).collect();
+        let buses: Vec<Bus> = fresh.buses.into_iter().map(|new| self.buses.iter().find(|b| b.key == new.key).cloned().unwrap_or(new)).collect();
+        self.strips = strips;
+        self.buses = buses;
+
+        let is_bus = |key: &String| self.buses.iter().any(|b| &b.key == key);
+        for strip in &mut self.strips {
+            strip.routes.retain(is_bus);
+        }
+        let recorder = &mut self.recorder;
+        recorder.playback_buses.retain(is_bus);
+        recorder.record_buses.retain(is_bus);
+        recorder.armed_inputs.retain(|key| self.strips.iter().any(|s| &s.key == key));
     }
 
     /// Display names by node key, as the recorder shows them: strips by their
@@ -419,6 +477,38 @@ mod tests {
         assert_eq!(keys, ["A1", "A2", "A3", "B1", "B2"]);
         assert_eq!(m.strips.len(), 5);
         assert_eq!(m.strips.iter().filter(|s| s.kind == Kind::Virtual).count(), 2);
+    }
+
+    #[test]
+    fn changing_the_layout_keeps_what_remains() {
+        let mut m = Mixer::default();
+        assert_eq!(m.layout(), Layout::DEFAULT);
+        m.strips[0].gain_db = -7.0; // hw1
+        m.strips[3].label = "Music".into(); // v1
+        m.strips[0].routes = BTreeSet::from(["A3".to_string(), "B1".to_string()]);
+        m.buses[2].gain_db = 3.0; // A3
+        m.recorder.playback_buses = BTreeSet::from(["A3".to_string()]);
+        m.recorder.armed_inputs = BTreeSet::from(["hw3".to_string(), "v1".to_string()]);
+
+        m.set_layout(Layout { hw_in: 5, virt_in: 3, hw_out: 5, virt_out: 3 });
+        let keys = |m: &Mixer| (m.strips.iter().map(|s| s.key.clone()).collect::<Vec<_>>().join(" "), m.buses.iter().map(|b| b.key.clone()).collect::<Vec<_>>().join(" "));
+        assert_eq!(keys(&m), ("hw1 hw2 hw3 hw4 hw5 v1 v2 v3".to_string(), "A1 A2 A3 A4 A5 B1 B2 B3".to_string()));
+        assert_eq!((m.strips[0].gain_db, m.strips[5].label.as_str(), m.buses[2].gain_db), (-7.0, "Music", 3.0));
+        assert_eq!(m.strips[4].routes, BTreeSet::from(["A1".to_string()]), "new strips start on A1");
+
+        m.set_layout(Layout { hw_in: 2, virt_in: 1, hw_out: 2, virt_out: 1 });
+        assert_eq!(keys(&m), ("hw1 hw2 v1".to_string(), "A1 A2 B1".to_string()));
+        assert_eq!(m.strips[0].routes, BTreeSet::from(["B1".to_string()]), "the route to A3 went with A3");
+        m.set_layout(Layout { virt_out: 0, ..m.layout() });
+        assert!(m.strips[0].routes.is_empty(), "and the route to B1 with B1");
+        assert!(m.recorder.playback_buses.is_empty());
+        assert_eq!(m.recorder.armed_inputs, BTreeSet::from(["v1".to_string()]));
+        assert_eq!(m.strips[2].label, "Music");
+
+        m.set_layout(Layout { hw_in: 0, virt_in: 9, hw_out: 9, virt_out: 9 });
+        assert_eq!(m.layout(), Layout { hw_in: 1, virt_in: 4, hw_out: 5, virt_out: 3 }, "clamped to what the window lays out");
+        let graph = m.to_graph();
+        assert_eq!((graph.sources.len(), graph.sinks.len()), (5 + 1, 8), "the engine gets every strip plus the player");
     }
 
     #[test]
