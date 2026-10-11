@@ -417,8 +417,9 @@ impl App {
         }
         self.next_stats_check = Instant::now() + STATS_CHECK;
         let stats = self.backend.stats();
-        // The drift reading always moves; only the counters and errors count as news.
-        let counters = |line: &String| line.split(", ").filter(|part| !part.starts_with("clock drift")).collect::<Vec<_>>().join(", ");
+        // The drift and buffer readings always move; only the counters and errors count as news.
+        let moving = |part: &&str| ["clock drift", "buffer", "block"].iter().any(|p| part.starts_with(p));
+        let counters = |line: &String| line.split(", ").filter(|part| !moving(part)).collect::<Vec<_>>().join(", ");
         let mut errors: Vec<String> = self.backend.node_errors().into_iter().map(|(key, e)| format!("{key}: {e}")).collect();
         errors.sort();
         let news = stats.iter().map(counters).chain(errors).collect::<Vec<_>>().join(" | ");

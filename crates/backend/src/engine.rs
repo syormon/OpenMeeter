@@ -6,16 +6,27 @@
 //! stream runs in the engine format (48 kHz stereo f32): the platform audio API
 //! converts, so no sample-rate conversion happens here.
 //!
-//! Devices never share a clock exactly, so each sink keeps every ring near
-//! [`Params::target_frames`] by resampling each source at a rate a few ppm off 1.0,
-//! steered by the smoothed fill level (see [`crate::resample`]). No sample is ever
-//! dropped or repeated for drift, which would be audible as grain on bright material.
+//! Each sink holds some audio from every source in a ring. Three things move a
+//! ring's fill level, and each is handled differently:
 //!
-//! The rate correction is deliberately gentle, so it can't clear a backlog: when a
-//! sink's thread is held up (a busy system) while a source keeps delivering, the
-//! extra audio would leave that sink playing late for a minute, out of step with
-//! every other output. A sustained backlog is therefore skipped in one go, with a
-//! short fade either side of the cut (see `SNAP_FADE_FRAMES`).
+//! - **Delivery is lumpy.** A source hands over audio in packets, sometimes
+//!   several at once (a capture thread woke late, a device with a long period);
+//!   a sink asks for blocks of its own size. So the fill swings between a low
+//!   point, just before a delivery, and a crest. The engine measures that swing
+//!   and regulates the *low point*, holding it at [`Params::target_frames`] (or
+//!   what the sink's largest block needs). Lumpy sources thus get exactly the
+//!   extra buffering their lumps need; nothing is ever judged by one instant's fill.
+//!   A source that still runs dry (an occasional long stall) earns a cushion on top,
+//!   which fades again over minutes of clean running.
+//! - **Clocks drift.** Devices never share a clock exactly, so each source is
+//!   resampled at a rate a few ppm off 1.0, steered by the smoothed low point (see
+//!   [`crate::resample`]). No sample is dropped or repeated for drift, which would
+//!   be audible as grain on bright material.
+//! - **Backlogs appear.** When a sink is held up (a busy system) while a source
+//!   keeps delivering, the extra audio would leave that sink playing late for a
+//!   minute, out of step with every other output; the rate correction is too
+//!   gentle to clear it. A low point that stays well above its target is therefore
+//!   skipped in one go, with a short fade either side (see `SNAP_FADE_FRAMES`).
 //!
 //! Gains, mutes and routes live in [`Params`] as atomics, so changing them never
 //! restarts a stream. Device access is the platform's job, through [`DeviceIo`].
@@ -35,30 +46,35 @@ pub const SAMPLE_RATE: usize = ENGINE_SAMPLE_RATE as usize;
 pub const CHANNELS: usize = ENGINE_CHANNELS;
 /// Default buffered audio per source (20 ms); see [`Params::target_frames`].
 pub const DEFAULT_TARGET_FRAMES: usize = 960;
-/// Smoothing for the fill level (per render callback, ~0.5 s time constant).
-const FILL_SMOOTHING: f32 = 0.02;
-/// Faster smoothing while a source warms up, so a backlog is noticed within a
-/// few blocks rather than after half a second.
-const WARMUP_SMOOTHING: f32 = 0.2;
-/// How long after priming a source counts as warming up. Streams settle
-/// unevenly as they start (a late burst from the source, a large first request
-/// from the sink), so the fill level is snapped back to the target at once
-/// instead of being drifted there one frame per block over several seconds.
-const WARMUP_FRAMES: usize = SAMPLE_RATE;
-/// Most snaps per warm-up, so bursty-but-steady delivery can't keep triggering them.
-const WARMUP_MAX_SNAPS: u8 = 3;
-/// Rate correction per frame of fill error. With the fill smoothing this settles
-/// in about ten seconds; typical clock drift (under 100 ppm) then holds the fill
-/// within 50 frames of the target.
+/// Smoothing for a ring's low point (per render callback, ~0.5 s time constant).
+const LEVEL_SMOOTHING: f32 = 0.02;
+/// A ring's low point and crest are taken over the last one to two of these
+/// (0.25 s each): long enough to span several deliveries of the lumpiest source.
+const WINDOW_FRAMES: usize = SAMPLE_RATE / 4;
+/// Headroom (5 ms) between a ring's low point and what the sink's largest block
+/// needs, when that is more than the user's buffer setting.
+const MARGIN_FRAMES: usize = 240;
+/// Added to a ring's cushion each time it runs dry (at least; a larger block adds
+/// more), the most a cushion can reach (100 ms), and how much of it remains after
+/// each clean window (so it halves in about three minutes).
+const CUSHION_STEP_FRAMES: usize = 240;
+const MAX_CUSHION_FRAMES: f32 = 4800.0;
+const CUSHION_DECAY: f32 = 0.999;
+/// How fast the remembered largest block shrinks (per callback; halves in ~70 s),
+/// so one oversized request at start-up doesn't cost latency forever.
+const BLOCK_DECAY: f32 = 0.9999;
+/// Rate correction per frame of low-point error. With the smoothing this settles
+/// in about ten seconds; typical clock drift (under 100 ppm) then holds the low
+/// point within 50 frames of its target.
 const DRIFT_GAIN: f64 = 2e-6;
 /// Largest rate correction (2000 ppm, about 3.5 cents: far beyond real clock
 /// drift, so hitting it means the source is bursty rather than drifting).
 const MAX_DRIFT: f64 = 2e-3;
-/// Backlog beyond the target (130 ms) that is dropped outright, e.g. audio queued
-/// before the sink started.
+/// Backlog beyond a ring's expected crest (130 ms) that is dropped at once, even
+/// before the low point is known, e.g. audio queued before the sink started.
 const EMERGENCY_EXTRA_FRAMES: usize = 6240;
-/// Smallest sustained backlog (10 ms) that is skipped rather than left to the rate
-/// correction; see [`Params::snap_frames`].
+/// Smallest backlog (10 ms, measured at the low point) that is skipped rather
+/// than left to the rate correction; see [`Params::snap_frames`].
 const MIN_SNAP_FRAMES: usize = 480;
 /// Fade out before and in after a skip, so the cut is a soft dip rather than a click.
 const SNAP_FADE_FRAMES: usize = 64;
@@ -104,6 +120,11 @@ pub struct NodeParams {
     pub dropped_frames: AtomicU64,
     /// Sinks only: the largest rate correction currently applied to a source, in ppm.
     drift_ppm: AtomicF32,
+    /// Sinks only: the low point each ring is held at, the largest swing above it
+    /// among the sources, and the largest block the device asked for, in frames.
+    floor_frames: AtomicU32,
+    swing_frames: AtomicU32,
+    max_block: AtomicU32,
     /// Why this node's stream failed to start or stopped (e.g. unplugged).
     /// Only touched on failure and by the UI, never in the audio path.
     error: Mutex<Option<String>>,
@@ -217,15 +238,10 @@ impl Params {
         self.target_frames
     }
 
-    /// Tolerance around the target before drift correction kicks in (a quarter of it).
-    fn band_frames(&self) -> f32 {
-        self.target_frames as f32 / 4.0
-    }
-
-    /// Sustained backlog above the target that is skipped in one go: half the
-    /// target, but no less than normal block-to-block jitter can reach.
-    fn snap_frames(&self) -> f32 {
-        (self.target_frames / 2).max(MIN_SNAP_FRAMES) as f32
+    /// Backlog at a ring's low point that is skipped in one go: half the target,
+    /// but no less than the low point wanders by itself.
+    fn snap_frames(&self) -> usize {
+        (self.target_frames / 2).max(MIN_SNAP_FRAMES)
     }
 
     pub fn set_route(&self, source: usize, sink: usize, on: bool) {
@@ -320,16 +336,70 @@ impl Drop for CaptureStream {
     }
 }
 
-/// One source as seen by a sink: its ring plus drift-tracking state.
+/// The lowest and highest fill a ring showed over the last one to two windows.
+#[derive(Clone, Copy)]
+struct FillWindow {
+    /// (low, high) of the window being filled, and of the one before it.
+    current: (usize, usize),
+    previous: Option<(usize, usize)>,
+    /// Frames until `current` becomes `previous`.
+    left: usize,
+}
+
+impl FillWindow {
+    fn new(fill: usize) -> Self {
+        Self { current: (fill, fill), previous: None, left: WINDOW_FRAMES }
+    }
+
+    /// Note the fill at the start of a block of `frames`. True when a window completed.
+    fn observe(&mut self, fill: usize, frames: usize) -> bool {
+        self.current = (self.current.0.min(fill), self.current.1.max(fill));
+        if self.left > frames {
+            self.left -= frames;
+            return false;
+        }
+        self.previous = Some(self.current);
+        self.current = (fill, fill);
+        self.left = WINDOW_FRAMES;
+        true
+    }
+
+    fn low(&self) -> usize {
+        self.previous.map_or(self.current.0, |p| p.0.min(self.current.0))
+    }
+
+    fn high(&self) -> usize {
+        self.previous.map_or(self.current.1, |p| p.1.max(self.current.1))
+    }
+
+    /// A whole window has been seen, so `low` really is a low point.
+    fn settled(&self) -> bool {
+        self.previous.is_some()
+    }
+
+    /// `frames` were just skipped: every level seen would have been that much lower.
+    fn lower(&mut self, frames: usize) {
+        let shift = |(low, high): (usize, usize)| (low.saturating_sub(frames), high.saturating_sub(frames));
+        self.current = shift(self.current);
+        self.previous = self.previous.map(shift);
+    }
+}
+
+/// One source as seen by a sink: its ring plus the state that regulates it.
 struct SourceReader {
     source: usize,
     ring: Consumer<f32>,
     primed: bool,
-    fill_avg: f32,
-    /// Frames of warm-up left since priming (see [`WARMUP_FRAMES`]).
-    warmup_frames: usize,
-    /// Snaps left in this warm-up.
-    warmup_snaps: u8,
+    /// The ring's fill at the start of recent blocks.
+    window: FillWindow,
+    /// Smoothed low point of the fill; the rate correction steers it to the floor.
+    level: f32,
+    /// How far the fill swings above its low point (the source's lumpiness).
+    /// Remembered across re-buffering, which waits for this much extra.
+    swing: usize,
+    /// Extra held under the low point because this ring has run dry lately: the
+    /// source sometimes delivers later than its usual pattern.
+    cushion: f32,
     resampler: DriftResampler,
     /// Fade the next block in: it follows a gap or a skip.
     fade_in: bool,
@@ -340,7 +410,16 @@ struct SourceReader {
 
 impl SourceReader {
     fn new(source: usize, ring: Consumer<f32>, clocked: bool) -> Self {
-        Self { source, ring, primed: false, fill_avg: 0.0, warmup_frames: 0, warmup_snaps: 0, resampler: DriftResampler::new(), fade_in: false, clocked }
+        Self { source, ring, primed: false, window: FillWindow::new(0), level: 0.0, swing: 0, cushion: 0.0, resampler: DriftResampler::new(), fade_in: false, clocked }
+    }
+
+    /// Start (or restart) playing from a ring holding `buffered` frames.
+    fn prime(&mut self, buffered: usize) {
+        self.primed = true;
+        self.window = FillWindow::new(buffered);
+        self.level = buffered.saturating_sub(self.swing) as f32;
+        self.resampler.reset();
+        self.fade_in = true;
     }
 
     /// Discard `frames` of queued audio. What follows doesn't continue what was
@@ -380,6 +459,8 @@ pub struct RenderStream {
     delay_line: Vec<f32>,
     delay_pos: usize,
     scratch: Vec<f32>,
+    /// The largest block the device asked for lately (decays slowly).
+    block_max: f32,
     state: StreamState,
 }
 
@@ -425,79 +506,61 @@ impl RenderStream {
             self.scratch.resize(n, 0.0);
         }
         mix.fill(0.0);
-        let mut drift = 0f64;
+
+        // A ring must always hold what the largest block needs, so the low point is
+        // held at the user's buffer or, if the device asks for more at once, above that.
+        self.block_max = (self.block_max * BLOCK_DECAY).max(frames as f32);
+        let block_max = self.block_max.ceil() as usize;
+        let floor = params.target_frames.max(block_max + DriftResampler::LOOKAHEAD + MARGIN_FRAMES);
+        let (mut drift, mut swing, mut held_low) = (0f64, 0, floor);
 
         for input in &mut self.ins {
             let mut buffered = input.ring.slots() / CHANNELS;
-            let target_frames = params.target_frames;
-            if buffered > target_frames + EMERGENCY_EXTRA_FRAMES {
-                // A large backlog (e.g. queued before we started): skip to the target.
-                if input.skip(buffered - target_frames, stats) {
-                    buffered = target_frames;
-                    input.fill_avg = target_frames as f32;
-                }
-            }
-            if !input.primed {
-                // Enough for this block plus the resampler's lookahead, even when the
-                // device asks for more than the target at once (else it underruns forever).
-                let prime_frames = target_frames.max(frames + DriftResampler::LOOKAHEAD);
-                if buffered < prime_frames {
-                    continue;
-                }
-                // Not audible here yet, so a backlog (e.g. a burst at stream start) can
-                // be skipped outright instead of drained by the rate correction.
-                let excess = buffered - prime_frames;
-                if excess > 0
-                    && input.clocked
-                    && let Ok(chunk) = input.ring.read_chunk(excess * CHANNELS)
-                {
-                    chunk.commit_all();
-                    stats.dropped_frames.fetch_add(excess as u64, Ordering::Relaxed);
-                    buffered = prime_frames;
-                }
-                input.primed = true;
-                input.fill_avg = buffered as f32;
-                input.resampler.reset();
-                input.fade_in = true;
-                // Re-buffering during a warm-up continues it rather than starting another.
-                if input.warmup_frames == 0 {
-                    input.warmup_frames = WARMUP_FRAMES;
-                    input.warmup_snaps = WARMUP_MAX_SNAPS;
-                }
-            }
-
-            // Audio held in the resampler counts as buffered too.
-            let held = input.resampler.buffered().max(0.0) as usize;
-            let (target, band) = (target_frames as f32, params.band_frames());
-            let buffered_total = (buffered + held) as f32;
-            if input.clocked && input.warmup_frames > 0 {
-                input.warmup_frames = input.warmup_frames.saturating_sub(frames);
-                input.fill_avg += (buffered_total - input.fill_avg) * WARMUP_SMOOTHING;
-                if input.warmup_snaps > 0 {
-                    if input.fill_avg > target + band && buffered > target_frames {
-                        // A sustained backlog: skip it in one go.
-                        if input.skip(buffered - target_frames, stats) {
-                            input.fill_avg = target;
-                            input.warmup_snaps -= 1;
-                        }
-                    } else if input.fill_avg < target - band {
-                        // Running low: re-buffer (a moment of silence) rather than creep back up.
-                        input.primed = false;
-                        input.warmup_snaps -= 1;
+            // This ring's own low point: the floor plus whatever its stalls have earned.
+            let floor = floor + input.cushion as usize;
+            if !input.clocked {
+                // The file player: its feeder keeps the ring topped up, so play it 1:1.
+                if !input.primed {
+                    if buffered < params.target_frames.max(frames + DriftResampler::LOOKAHEAD) {
                         continue;
                     }
+                    input.prime(buffered);
                 }
-            } else if input.clocked {
-                input.fill_avg += (buffered_total - input.fill_avg) * FILL_SMOOTHING;
+            } else {
+                // Far more queued than even a crest should reach (e.g. audio queued
+                // before this sink started): skip it now rather than play it late.
+                let crest = floor + input.swing;
+                if buffered > crest + EMERGENCY_EXTRA_FRAMES && input.skip(buffered - crest, stats) {
+                    buffered = crest;
+                    input.primed = false;
+                }
+                if !input.primed {
+                    // Wait for the low point plus the swing seen before: a source that
+                    // delivers in bursts is otherwise started on a crest and runs dry
+                    // before its next burst, over and over.
+                    if buffered < crest {
+                        continue;
+                    }
+                    input.prime(buffered);
+                }
+                // Audio held in the resampler counts as buffered too.
+                let fill = buffered + input.resampler.buffered().max(0.0) as usize;
+                let window_done = input.window.observe(fill, frames);
+                let (low, high) = (input.window.low(), input.window.high());
+                input.level += (low as f32 - input.level) * LEVEL_SMOOTHING;
+                // Follow the swing up at once; let it and the cushion shrink a little per window.
+                if window_done {
+                    input.swing -= input.swing / 32;
+                    input.cushion *= CUSHION_DECAY;
+                }
+                input.swing = input.swing.max(high - low);
+                swing = swing.max(input.swing);
+                held_low = held_low.max(floor);
             }
-            // A backlog the rate correction would take most of a minute to drain
-            // (this sink was held up while the source kept delivering): play this
-            // block out, fading, then skip to the target.
-            let snap = input.clocked && input.warmup_frames == 0 && input.fill_avg > target + params.snap_frames();
 
-            // Drift correction: consume input slightly faster (source fast, fill above
-            // target) or slower than we play it.
-            let ratio = if input.clocked { 1.0 + ((input.fill_avg - target) as f64 * DRIFT_GAIN).clamp(-MAX_DRIFT, MAX_DRIFT) } else { 1.0 };
+            // Drift correction: consume input slightly faster (source fast, low point
+            // above the floor) or slower than we play it.
+            let ratio = if input.clocked { 1.0 + ((input.level - floor as f32) as f64 * DRIFT_GAIN).clamp(-MAX_DRIFT, MAX_DRIFT) } else { 1.0 };
             if (ratio - 1.0).abs() > drift.abs() {
                 drift = ratio - 1.0;
             }
@@ -507,8 +570,10 @@ impl RenderStream {
             let got = input.ring.pop_partial_slice(slot).0.len();
             input.resampler.commit(need, got);
             if got < need * CHANNELS {
-                // Underrun: drop this block and re-buffer before mixing this source again.
+                // Underrun: drop this block and re-buffer before mixing this source again,
+                // holding more from now on so the same stall doesn't empty the ring again.
                 input.primed = false;
+                input.cushion = (input.cushion + frames.max(CUSHION_STEP_FRAMES) as f32).min(MAX_CUSHION_FRAMES);
                 stats.underruns.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
@@ -517,13 +582,16 @@ impl RenderStream {
             if std::mem::take(&mut input.fade_in) {
                 fade_in(out);
             }
-            if snap {
+            // A backlog: even the low point is well above the floor, which the rate
+            // correction would take most of a minute to fix (this sink was held up
+            // while the source kept delivering). Skip the excess, fading around the cut.
+            let low = input.window.low();
+            if input.clocked && input.window.settled() && low > floor + params.snap_frames() {
+                let excess = (low - floor).min(input.ring.slots() / CHANNELS);
                 fade_out(out);
-                // Leave what a block needs once the next delivery arrives.
-                let keep = target_frames.max(frames + DriftResampler::LOOKAHEAD).saturating_sub(frames);
-                let queued = input.ring.slots() / CHANNELS;
-                if queued > keep && input.skip(queued - keep, stats) {
-                    input.fill_avg = target;
+                if input.skip(excess, stats) {
+                    input.window.lower(excess);
+                    input.level = floor as f32;
                 }
             }
             if params.route(input.source, k) {
@@ -533,6 +601,9 @@ impl RenderStream {
             }
         }
         stats.drift_ppm.store((drift * 1e6) as f32);
+        stats.floor_frames.store(held_low as u32, Ordering::Relaxed);
+        stats.swing_frames.store(swing as u32, Ordering::Relaxed);
+        stats.max_block.store(block_max as u32, Ordering::Relaxed);
 
         stats.process(mix);
         stats.tap(mix);
@@ -614,6 +685,7 @@ impl Engine {
                 delay_line: vec![0f32; (MAX_DELAY_FRAMES + 1) * CHANNELS],
                 delay_pos: 0,
                 scratch: Vec::new(),
+                block_max: 0.0,
                 state: state(&ready_tx),
             };
             let (io, params) = (io.clone(), params.clone());
@@ -676,14 +748,15 @@ fn apply_delay(line: &mut [f32], pos: &mut usize, delay: usize, buf: &mut [f32])
 
 /// Feed the file player into the sink rings. The player has no clock of its own,
 /// so it simply keeps every ring a little above the sinks' target fill (enough for
-/// a full block plus the resampler's lookahead); each sink then plays it 1:1 at its
-/// own device rate and no drift correction is ever needed.
+/// the largest block any sink asks for plus the resampler's lookahead); each sink
+/// then plays it 1:1 at its own device rate.
 fn feed_player(player: &Player, s: usize, params: &Params, mut outs: Vec<Producer<f32>>, running: &AtomicBool) {
     const BLOCK_FRAMES: usize = 480;
     let mut buf = vec![0f32; BLOCK_FRAMES * CHANNELS];
     while running.load(Ordering::Relaxed) {
         let fill = outs.iter().map(|o| RING_FRAMES - o.slots() / CHANNELS).min();
-        let wants_audio = fill.is_some_and(|f| f < params.target_frames + DriftResampler::LOOKAHEAD);
+        let largest_block = params.sinks.iter().map(|sink| sink.max_block.load(Ordering::Relaxed) as usize).max().unwrap_or(0);
+        let wants_audio = fill.is_some_and(|f| f < params.target_frames.max(largest_block) + DriftResampler::LOOKAHEAD);
         let frames = if wants_audio { player.read(&mut buf) } else { 0 };
         if frames == 0 {
             std::thread::sleep(Duration::from_millis(2));
@@ -903,7 +976,11 @@ impl EngineHost {
                 let underruns = p.underruns.load(Ordering::Relaxed);
                 let dropped = p.dropped_frames.load(Ordering::Relaxed);
                 let ppm = p.drift_ppm.load();
-                format!("{key}: {underruns} underruns, clock drift {ppm:+.0} ppm, {dropped} backlog frames dropped")
+                let ms = |frames: &AtomicU32| frames.load(Ordering::Relaxed) as f32 * 1000.0 / SAMPLE_RATE as f32;
+                let (floor, swing, block) = (ms(&p.floor_frames), ms(&p.swing_frames), ms(&p.max_block));
+                format!(
+                    "{key}: {underruns} underruns, clock drift {ppm:+.0} ppm, {dropped} backlog frames dropped, buffer {floor:.0}+{swing:.0} ms, block {block:.0} ms"
+                )
             })
             .collect()
     }
@@ -1006,7 +1083,7 @@ mod tests {
         let (mut tx, rx) = RingBuffer::new(RING_FRAMES * CHANNELS);
         let state = StreamState { params: params.clone(), running: Arc::new(AtomicBool::new(true)), ready: None };
         let delay_line = vec![0.0; (MAX_DELAY_FRAMES + 1) * CHANNELS];
-        let mut stream = RenderStream { index: 0, ins: vec![SourceReader::new(0, rx, true)], delay_line, delay_pos: 0, scratch: Vec::new(), state };
+        let mut stream = RenderStream { index: 0, ins: vec![SourceReader::new(0, rx, true)], delay_line, delay_pos: 0, scratch: Vec::new(), block_max: 0.0, state };
         let block = vec![0.5f32; 961 * CHANNELS];
         let mut mix = vec![0f32; 960 * CHANNELS];
         let mut played = 0;
@@ -1027,7 +1104,7 @@ mod tests {
         let (tx, rx) = RingBuffer::new(RING_FRAMES * CHANNELS);
         let state = StreamState { params: params.clone(), running: Arc::new(AtomicBool::new(true)), ready: None };
         let delay_line = vec![0.0; (MAX_DELAY_FRAMES + 1) * CHANNELS];
-        let stream = RenderStream { index: 0, ins: vec![SourceReader::new(0, rx, true)], delay_line, delay_pos: 0, scratch: Vec::new(), state };
+        let stream = RenderStream { index: 0, ins: vec![SourceReader::new(0, rx, true)], delay_line, delay_pos: 0, scratch: Vec::new(), block_max: 0.0, state };
         (params, tx, stream)
     }
 
@@ -1068,6 +1145,109 @@ mod tests {
         let late = run(&mut tx, &mut stream, 200); // 2 s later
         assert!(late <= 960 + 480, "backlog still {late} frames 2 s after a stall");
         assert_eq!(params.sinks[0].underruns.load(Ordering::Relaxed), 0);
+    }
+
+    /// What a simulated sink did once it had settled.
+    struct Simulated {
+        underruns: u64,
+        dropped: u64,
+        /// Lowest and highest ring fill at the start of a block, in frames.
+        fill: (usize, usize),
+    }
+
+    /// Run a sink through simulated time. The source delivers `packet` frames at a
+    /// time, running `ppm` fast; the sink asks for `block` frames at a time. The
+    /// first seconds, where the engine learns the pattern, aren't counted.
+    fn simulate(target: usize, packet: usize, block: usize, ppm: f64) -> Simulated {
+        simulate_with_stalls(target, packet, block, ppm, None, 5, 20)
+    }
+
+    /// As [`simulate`], with the source also stalling: `stall = (every, frames)`
+    /// holds every `every`-th delivery back by `frames`, the ones behind it too.
+    fn simulate_with_stalls(target: usize, packet: usize, block: usize, ppm: f64, stall: Option<(usize, usize)>, settle: usize, seconds: usize) -> Simulated {
+        let (params, mut tx, mut stream) = manual_sink(target);
+        let sink = &params.sinks[0];
+        let data = vec![0.25f32; packet * CHANNELS];
+        let mut mix = vec![0f32; block * CHANNELS];
+        let packet_time = packet as f64 / (1.0 + ppm * 1e-6);
+        let (mut next_packet, mut next_block) = (0f64, 0usize);
+        let mut settled = (0, 0);
+        let mut fill = (usize::MAX, 0);
+        let (mut delivered, mut held_until) = (0usize, 0f64);
+        while next_block < seconds * SAMPLE_RATE {
+            if next_packet.max(held_until) <= next_block as f64 {
+                let _ = tx.push_entire_slice(&data);
+                next_packet += packet_time;
+                delivered += 1;
+                if let Some((every, frames)) = stall
+                    && delivered % every == 0
+                {
+                    held_until = next_packet + frames as f64;
+                }
+                continue;
+            }
+            if next_block < settle * SAMPLE_RATE {
+                settled = (sink.underruns.load(Ordering::Relaxed), sink.dropped_frames.load(Ordering::Relaxed));
+            } else {
+                let queued = stream.ins[0].ring.slots() / CHANNELS;
+                fill = (fill.0.min(queued), fill.1.max(queued));
+            }
+            stream.fill(&mut mix);
+            next_block += block;
+        }
+        Simulated {
+            underruns: sink.underruns.load(Ordering::Relaxed) - settled.0,
+            dropped: sink.dropped_frames.load(Ordering::Relaxed) - settled.1,
+            fill,
+        }
+    }
+
+    #[test]
+    fn lumpy_delivery_plays_without_gaps() {
+        // (frames per delivery, frames per block). Sources hand over several packets
+        // at once when their thread wakes late or the device has a long period; these
+        // patterns used to make the engine drop the "excess" of each burst, run dry
+        // before the next one and re-buffer, dozens of times a second.
+        for (packet, block) in [(480, 480), (480, 448), (960, 480), (960, 448), (1440, 480), (1344, 448), (1920, 448), (1440, 128)] {
+            let run = simulate(960, packet, block, 0.0);
+            assert_eq!((run.underruns, run.dropped), (0, 0), "{packet} frames at a time into blocks of {block}");
+            assert!(run.fill.0 >= block, "{packet}/{block}: ring ran down to {} frames", run.fill.0);
+            // At most the skip threshold plus the cushion one start-up underrun earns.
+            assert!(run.fill.0 <= 960 + 480 + 480, "{packet}/{block}: low point {} is far above the target", run.fill.0);
+        }
+    }
+
+    #[test]
+    fn blocks_larger_than_the_buffer_play_without_gaps() {
+        // A shared-mode device asks for its whole buffer when our thread wakes late.
+        for block in [960, 1024, 1056, 2048] {
+            let run = simulate(960, 480, block, 0.0);
+            assert_eq!((run.underruns, run.dropped), (0, 0), "blocks of {block}");
+        }
+        // And a small buffer setting can't starve a normal block either.
+        let run = simulate(240, 480, 480, 0.0);
+        assert_eq!((run.underruns, run.dropped), (0, 0), "5 ms buffer");
+    }
+
+    #[test]
+    fn a_source_that_keeps_stalling_earns_a_cushion() {
+        // Even delivery, but every 3 s the source's thread is held up for 25 ms and
+        // then hands over everything at once. The default buffer has 10 ms to spare,
+        // so the first stalls run the ring dry; after that the cushion absorbs them.
+        let every = 300;
+        let run = simulate_with_stalls(960, 480, 480, 0.0, Some((every, 1200)), 15, 60);
+        assert_eq!(run.underruns, 0, "stalls still run the ring dry after 15 s");
+        assert!(run.fill.1 < 960 + 4800, "crest {} frames: the cushion ran away", run.fill.1);
+    }
+
+    #[test]
+    fn drifting_clocks_are_followed_without_gaps_or_skips() {
+        for ppm in [-300.0, 300.0] {
+            for (packet, block) in [(480, 480), (1440, 448)] {
+                let run = simulate(960, packet, block, ppm);
+                assert_eq!((run.underruns, run.dropped), (0, 0), "{ppm} ppm, {packet}/{block}");
+            }
+        }
     }
 
     #[test]
