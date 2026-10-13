@@ -113,7 +113,7 @@ jobs:
           mkdir -p "dist/$name"
           cp target/release/openmeeter "dist/$name/"
           strip "dist/$name/openmeeter"
-          cp README.md images/icon.png "dist/$name/"
+          cp README.md images/icon.svg "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           rm -r "dist/$name"
 

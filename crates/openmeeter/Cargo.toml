@@ -40,4 +40,6 @@ eframe = { version = "0.36.2", features = ["glow"] }
 
 [build-dependencies]
 image = { version = "0.25.10", default-features = false, features = ["png", "ico"] }
+# Renders images/icon.svg. No text support on purpose: it would depend on installed fonts.
+resvg = { version = "0.48", default-features = false, features = ["raster-images"] }
 winresource = "0.1.31"

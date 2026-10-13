@@ -26,10 +26,14 @@ use widgets::text;
 
 const METER_FPS: u64 = 60;
 
-/// App icon (1024x1024); also embedded as the .exe icon by build.rs.
-const ICON_PNG: &[u8] = include_bytes!("../../../../images/icon.png");
+/// App icon (1024x1024), rendered from images/icon.svg by build.rs, which also
+/// embeds it as the .exe icon.
+const ICON_PNG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon.png"));
 /// The wordmark's bounding box inside the icon, in icon pixels.
-const LOGO_CROP: ([usize; 2], [usize; 2]) = ([96, 240], [852, 540]);
+const LOGO_CROP: ([usize; 2], [usize; 2]) = ([28, 242], [962, 417]);
+/// How different from the icon's background a pixel must be (summed over R, G, B)
+/// to count as fully part of the wordmark; less than that fades out.
+const LOGO_KEY_RANGE: i32 = 48;
 const LOGO_HEIGHT: f32 = 28.0;
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 /// How often the engine's counters are checked for the log, and how often they
@@ -118,10 +122,25 @@ fn can_hide_window(use_x11: bool) -> bool {
 /// The wordmark cropped out of the app icon, as a texture for the title row.
 fn load_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
     let icon = eframe::icon_data::from_png_bytes(ICON_PNG).ok()?;
-    let full = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
+    let mut rgba = icon.rgba;
+    key_out_background(&mut rgba);
+    let full = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &rgba);
     let (pos, size) = LOGO_CROP;
     let logo = full.region_by_pixels(pos, size);
     Some(ctx.load_texture("logo", logo, egui::TextureOptions::LINEAR))
+}
+
+/// If the icon has a solid background (its top-left pixel is opaque), make that
+/// colour transparent, so the wordmark sits on the window's own background
+/// whatever the theme. An icon that is already transparent is left alone.
+fn key_out_background(rgba: &mut [u8]) {
+    let Some(&[r, g, b, 255]) = rgba.first_chunk::<4>() else { return };
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        let distance: i32 = pixel.iter().zip([r, g, b]).map(|(&c, k)| (c as i32 - k as i32).abs()).sum();
+        if distance < LOGO_KEY_RANGE {
+            pixel[3] = (pixel[3] as i32 * distance / LOGO_KEY_RANGE) as u8;
+        }
+    }
 }
 
 /// Size of the design grid for a given strip/bus layout.
@@ -878,6 +897,25 @@ mod tests {
             dev("in", "CABLE Input (VB-Audio Virtual Cable)", Direction::Playback, default_out_is_cable),
             dev("spk", "Speakers (Focusrite USB Audio)", Direction::Playback, !default_out_is_cable),
         ]
+    }
+
+    #[test]
+    fn the_rendered_icon_holds_the_wordmark_crop() {
+        let icon = eframe::icon_data::from_png_bytes(ICON_PNG).expect("build.rs renders images/icon.svg to a PNG");
+        let (pos, size) = LOGO_CROP;
+        assert!(pos[0] + size[0] <= icon.width as usize && pos[1] + size[1] <= icon.height as usize, "LOGO_CROP lies inside the icon");
+    }
+
+    #[test]
+    fn a_solid_icon_background_becomes_transparent() {
+        let mut rgba = vec![44, 63, 79, 255, 44, 63, 79, 255, 255, 255, 255, 255, 60, 80, 96, 255];
+        key_out_background(&mut rgba);
+        assert_eq!((rgba[3], rgba[7], rgba[11]), (0, 0, 255), "background gone, wordmark kept");
+        assert!(rgba[15] == 255, "colours well away from the background stay opaque");
+
+        let mut transparent = vec![0, 0, 0, 0, 10, 10, 10, 255];
+        key_out_background(&mut transparent);
+        assert_eq!(transparent[7], 255, "an icon with a transparent corner is left alone");
     }
 
     #[test]
