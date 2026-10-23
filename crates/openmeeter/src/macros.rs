@@ -10,6 +10,8 @@ use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use serde::{Deserialize, Serialize};
 
+use crate::model::{MAX_GAIN_DB, MIN_GAIN_DB, Mixer};
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Macro {
     pub name: String,
@@ -27,38 +29,196 @@ impl Default for Macro {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MacroAction {
     RestartEngine,
+    /// Bring the window to the front, or hide it if it already is.
+    ShowHideWindow,
+    /// Replace the mixer (and theme) with a saved settings file, like Load Settings.
+    LoadSettings { path: Option<PathBuf> },
+    /// Run a Lua script from the scripts folder, by name (without ".lua").
+    RunScript { name: String },
+
+    // The recorder's transport.
+    PlayPause,
+    /// Stop and rewind playback, and end a recording.
+    Stop,
+    /// Stop and rewind playback, leaving a recording running.
+    StopPlayback,
+    Rewind,
+    FastForward,
+    ToggleRecording,
     /// Play an audio file through the recorder's playback buses, from the start.
     PlayClip { path: Option<PathBuf> },
-    StopPlayback,
-    ToggleRecording,
-    /// Mute or unmute a strip or bus, by key.
+    Eject,
+
+    // Strips and buses, by key.
+    /// Mute or unmute a strip or bus.
     ToggleMute { key: String },
+    ToggleSolo { key: String },
+    /// Switch a strip's A1/B1/... button.
+    ToggleRoute { key: String, bus: String },
+    ToggleMono { key: String },
+    /// Move a strip or bus fader to `db`.
+    SetGain { key: String, db: f32 },
+    /// Move a strip or bus fader by `db` (negative turns it down).
+    ChangeGain { key: String, db: f32 },
+}
+
+/// What a macro action acts on, for the target pickers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Targets {
+    None,
+    Strips,
+    StripsAndBuses,
 }
 
 impl MacroAction {
-    /// One of each kind, for the action picker.
-    pub fn kinds() -> [MacroAction; 5] {
-        [
-            MacroAction::RestartEngine,
-            MacroAction::PlayClip { path: None },
-            MacroAction::StopPlayback,
-            MacroAction::ToggleRecording,
-            MacroAction::ToggleMute { key: String::new() },
+    /// One of each kind, in picker order; `None` marks a separator.
+    pub fn kinds() -> Vec<Option<MacroAction>> {
+        let key = String::new;
+        vec![
+            Some(MacroAction::RestartEngine),
+            Some(MacroAction::ShowHideWindow),
+            Some(MacroAction::LoadSettings { path: None }),
+            Some(MacroAction::RunScript { name: String::new() }),
+            None,
+            Some(MacroAction::PlayPause),
+            Some(MacroAction::Stop),
+            Some(MacroAction::StopPlayback),
+            Some(MacroAction::Rewind),
+            Some(MacroAction::FastForward),
+            Some(MacroAction::ToggleRecording),
+            Some(MacroAction::PlayClip { path: None }),
+            Some(MacroAction::Eject),
+            None,
+            Some(MacroAction::ToggleMute { key: key() }),
+            Some(MacroAction::ToggleSolo { key: key() }),
+            Some(MacroAction::ToggleRoute { key: key(), bus: key() }),
+            Some(MacroAction::ToggleMono { key: key() }),
+            Some(MacroAction::SetGain { key: key(), db: 0.0 }),
+            Some(MacroAction::ChangeGain { key: key(), db: 3.0 }),
         ]
     }
 
     pub fn label(&self) -> &'static str {
         match self {
             MacroAction::RestartEngine => "Restart Audio Engine",
-            MacroAction::PlayClip { .. } => "Play Sound Clip",
+            MacroAction::ShowHideWindow => "Show/Hide Window",
+            MacroAction::LoadSettings { .. } => "Load Settings",
+            MacroAction::RunScript { .. } => "Run Script",
+            MacroAction::PlayPause => "Play/Pause",
+            MacroAction::Stop => "Stop",
             MacroAction::StopPlayback => "Stop Playback",
+            MacroAction::Rewind => "Rewind",
+            MacroAction::FastForward => "Fast Forward",
             MacroAction::ToggleRecording => "Start/Stop Recording",
+            MacroAction::PlayClip { .. } => "Play Sound Clip",
+            MacroAction::Eject => "Eject Cassette",
             MacroAction::ToggleMute { .. } => "Toggle Mute",
+            MacroAction::ToggleSolo { .. } => "Toggle Solo",
+            MacroAction::ToggleRoute { .. } => "Toggle Output (A1, B1...)",
+            MacroAction::ToggleMono { .. } => "Toggle Mono",
+            MacroAction::SetGain { .. } => "Set Fader",
+            MacroAction::ChangeGain { .. } => "Fader Up/Down",
+        }
+    }
+
+    pub fn hint(&self) -> &'static str {
+        match self {
+            MacroAction::ShowHideWindow => "Bring OpenMeeter to the front, or hide it if it's already there",
+            MacroAction::LoadSettings { .. } => "Replace the mixer with a saved settings file, as Menu > Load Settings does",
+            MacroAction::RunScript { .. } => "Run a Lua script (Menu > Macro Scripts) that can change anything Voicemeeter's API can",
+            MacroAction::Stop => "Stop and rewind playback, and end a recording",
+            MacroAction::StopPlayback => "Stop and rewind playback, leaving a recording running",
+            MacroAction::PlayClip { .. } => "Play a file from the start through the recorder's playback buses",
+            MacroAction::Rewind | MacroAction::FastForward => "Skip playback by 10 seconds",
+            MacroAction::ToggleRoute { .. } => "Switch one of a strip's output buttons on or off",
+            MacroAction::ChangeGain { .. } => "Move the fader by this much; negative turns it down",
+            _ => "",
+        }
+    }
+
+    pub fn targets(&self) -> Targets {
+        match self {
+            MacroAction::ToggleSolo { .. } | MacroAction::ToggleRoute { .. } => Targets::Strips,
+            MacroAction::ToggleMute { .. } | MacroAction::ToggleMono { .. } | MacroAction::SetGain { .. } | MacroAction::ChangeGain { .. } => {
+                Targets::StripsAndBuses
+            }
+            _ => Targets::None,
         }
     }
 
     pub fn same_kind(&self, other: &MacroAction) -> bool {
         std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+
+    /// Carry the strip or bus over when switching to another kind of action.
+    pub fn with_target_of(mut self, previous: &MacroAction) -> Self {
+        if let (Some(from), Some(to)) = (previous.key(), self.key_mut()) {
+            *to = from.to_string();
+        }
+        self
+    }
+
+    pub fn key(&self) -> Option<&str> {
+        match self {
+            MacroAction::ToggleMute { key }
+            | MacroAction::ToggleSolo { key }
+            | MacroAction::ToggleRoute { key, .. }
+            | MacroAction::ToggleMono { key }
+            | MacroAction::SetGain { key, .. }
+            | MacroAction::ChangeGain { key, .. } => Some(key),
+            _ => None,
+        }
+    }
+
+    pub fn key_mut(&mut self) -> Option<&mut String> {
+        match self {
+            MacroAction::ToggleMute { key }
+            | MacroAction::ToggleSolo { key }
+            | MacroAction::ToggleRoute { key, .. }
+            | MacroAction::ToggleMono { key }
+            | MacroAction::SetGain { key, .. }
+            | MacroAction::ChangeGain { key, .. } => Some(key),
+            _ => None,
+        }
+    }
+
+    /// Apply a strip or bus action to the mixer. `Ok(false)` for actions that
+    /// aren't about the mixer; `Err` when the target is missing.
+    pub fn apply_to(&self, mixer: &mut Mixer) -> Result<bool, String> {
+        let missing = |key: &str| if key.is_empty() { "no strip or bus chosen".to_string() } else { format!("there is no {key} any more") };
+        match self {
+            MacroAction::ToggleSolo { key } => {
+                let strip = mixer.strips.iter_mut().find(|s| s.key == *key).ok_or_else(|| missing(key))?;
+                strip.solo = !strip.solo;
+            }
+            MacroAction::ToggleRoute { key, bus } => {
+                if !mixer.buses.iter().any(|b| b.key == *bus) {
+                    return Err(if bus.is_empty() { "no output chosen".into() } else { format!("there is no {bus} any more") });
+                }
+                let strip = mixer.strips.iter_mut().find(|s| s.key == *key).ok_or_else(|| missing(key))?;
+                if !strip.routes.remove(bus) {
+                    strip.routes.insert(bus.clone());
+                }
+            }
+            MacroAction::ToggleMute { key } | MacroAction::ToggleMono { key } | MacroAction::SetGain { key, .. } | MacroAction::ChangeGain { key, .. } => {
+                let (mute, mono, gain) = if let Some(s) = mixer.strips.iter_mut().find(|s| s.key == *key) {
+                    (&mut s.mute, &mut s.mono, &mut s.gain_db)
+                } else if let Some(b) = mixer.buses.iter_mut().find(|b| b.key == *key) {
+                    (&mut b.mute, &mut b.mono, &mut b.gain_db)
+                } else {
+                    return Err(missing(key));
+                };
+                match self {
+                    MacroAction::ToggleMute { .. } => *mute = !*mute,
+                    MacroAction::ToggleMono { .. } => *mono = !*mono,
+                    MacroAction::SetGain { db, .. } => *gain = db.clamp(MIN_GAIN_DB, MAX_GAIN_DB),
+                    MacroAction::ChangeGain { db, .. } => *gain = (*gain + db).clamp(MIN_GAIN_DB, MAX_GAIN_DB),
+                    _ => unreachable!("matched above"),
+                }
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
     }
 }
 
@@ -305,5 +465,46 @@ mod tests {
         let json = r#"{"name":"Clip","hotkey":"Numpad7","action":{"PlayClip":{"path":"C:/clip.wav"}}}"#;
         let m: Macro = serde_json::from_str(json).unwrap();
         assert_eq!(m.action, MacroAction::PlayClip { path: Some("C:/clip.wav".into()) });
+        let json = r#"{"name":"Mic","hotkey":null,"action":{"ToggleRoute":{"key":"hw1","bus":"A1"}}}"#;
+        let m: Macro = serde_json::from_str(json).unwrap();
+        assert_eq!(m.action, MacroAction::ToggleRoute { key: "hw1".into(), bus: "A1".into() });
+    }
+
+    #[test]
+    fn mixer_actions_change_their_target() {
+        let mut mixer = Mixer::default();
+        let (strip, bus) = (mixer.strips[0].key.clone(), mixer.buses[0].key.clone());
+        let routed = mixer.strips[0].routes.contains(&bus);
+
+        let route = MacroAction::ToggleRoute { key: strip.clone(), bus: bus.clone() };
+        assert_eq!(route.apply_to(&mut mixer), Ok(true));
+        assert_eq!(mixer.strips[0].routes.contains(&bus), !routed);
+        route.apply_to(&mut mixer).unwrap();
+        assert_eq!(mixer.strips[0].routes.contains(&bus), routed, "a second press switches it back");
+
+        MacroAction::ToggleSolo { key: strip.clone() }.apply_to(&mut mixer).unwrap();
+        assert!(mixer.strips[0].solo);
+        MacroAction::ToggleMute { key: bus.clone() }.apply_to(&mut mixer).unwrap();
+        assert!(mixer.buses[0].mute);
+
+        MacroAction::SetGain { key: strip.clone(), db: -6.0 }.apply_to(&mut mixer).unwrap();
+        MacroAction::ChangeGain { key: strip.clone(), db: 2.5 }.apply_to(&mut mixer).unwrap();
+        assert_eq!(mixer.strips[0].gain_db, -3.5);
+        for _ in 0..10 {
+            MacroAction::ChangeGain { key: strip.clone(), db: 3.0 }.apply_to(&mut mixer).unwrap();
+        }
+        assert_eq!(mixer.strips[0].gain_db, MAX_GAIN_DB, "faders stop at their ends");
+
+        assert!(MacroAction::ToggleSolo { key: bus }.apply_to(&mut mixer).is_err(), "buses have no solo");
+        assert!(MacroAction::ToggleMute { key: String::new() }.apply_to(&mut mixer).is_err());
+        assert_eq!(MacroAction::PlayPause.apply_to(&mut mixer), Ok(false));
+    }
+
+    #[test]
+    fn switching_actions_keeps_the_target() {
+        let before = MacroAction::ToggleMute { key: "hw2".into() };
+        let after = MacroAction::SetGain { key: String::new(), db: 0.0 }.with_target_of(&before);
+        assert_eq!(after.key(), Some("hw2"));
+        assert_eq!(MacroAction::PlayPause.with_target_of(&before), MacroAction::PlayPause);
     }
 }

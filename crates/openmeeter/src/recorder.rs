@@ -160,6 +160,47 @@ impl Recorder {
         }
     }
 
+    pub fn play(&mut self) {
+        if let Some(player) = &self.player {
+            player.play();
+        }
+    }
+
+    pub fn pause(&mut self) {
+        if let Some(player) = &self.player {
+            player.pause();
+        }
+    }
+
+    /// Play the loaded file from the start.
+    pub fn replay(&mut self) {
+        if let Some(player) = &self.player {
+            player.seek(0);
+            player.play();
+        }
+    }
+
+    pub fn goto(&mut self, seconds: f64) {
+        if let Some(player) = &self.player {
+            player.seek((seconds.max(0.0) * f64::from(ENGINE_SAMPLE_RATE)) as u64);
+        }
+    }
+
+    pub fn is_recording(&self) -> bool {
+        self.recording.is_some()
+    }
+
+    /// What macro scripts see of the recorder.
+    pub fn state(&self) -> crate::script::params::RecorderState {
+        let player = self.player.as_deref();
+        crate::script::params::RecorderState {
+            playing: player.is_some_and(Player::is_playing),
+            recording: self.recording.is_some(),
+            loaded: self.loaded.is_some(),
+            position: player.map_or(0.0, |p| p.position() as f64 / f64::from(ENGINE_SAMPLE_RATE)),
+        }
+    }
+
     /// Stop playback and rewind; also ends a recording.
     pub fn stop(&mut self, backend: &mut dyn AudioBackend) {
         if let Some(player) = &self.player {

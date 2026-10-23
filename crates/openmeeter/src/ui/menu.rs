@@ -26,6 +26,7 @@ pub enum MenuAction {
     OpenSystemSettings,
     OpenRecorderOptions,
     OpenMacros,
+    OpenScripts,
     OpenLayout,
     RefreshDevices,
     ShutDown,
@@ -139,6 +140,9 @@ pub fn contents(ui: &mut Ui, state: &MenuState) -> Option<MenuAction> {
     }
     if ui.button("Macro Buttons / Hotkeys...").clicked() {
         pick(A::OpenMacros);
+    }
+    if ui.button("Macro Scripts (Lua)...").clicked() {
+        pick(A::OpenScripts);
     }
     if ui.button("Refresh Device List").clicked() {
         pick(A::RefreshDevices);

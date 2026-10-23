@@ -5,6 +5,7 @@ mod macros;
 mod menu;
 mod panels;
 mod recorder_options;
+mod scripts;
 pub(crate) mod theme;
 mod tray;
 mod widgets;
@@ -19,6 +20,7 @@ use openmeeter_backend::{AudioBackend, DeviceId, DeviceInfo, Direction, cable_pa
 
 use crate::config::{self, AutoRestart, Config};
 use crate::recorder::{self, Recorder};
+use crate::script::params::{Command, Host, Transport};
 use panels::RecorderAction;
 use crate::model::{Kind, Mixer};
 use panels::{Ctx, DESIGN_H, HW_STRIP_W, TITLE_H, VIRT_STRIP_W};
@@ -26,15 +28,19 @@ use widgets::text;
 
 const METER_FPS: u64 = 60;
 
-/// App icon (1024x1024), rendered from images/icon.svg by build.rs, which also
+/// App icon (1024x1024), rendered from images/icon2.svg by build.rs, which also
 /// embeds it as the .exe icon.
 const ICON_PNG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/icon.png"));
-/// The wordmark's bounding box inside the icon, in icon pixels.
-const LOGO_CROP: ([usize; 2], [usize; 2]) = ([28, 242], [962, 417]);
+/// The wordmark shown at the top left of the window, rendered from images/icon.svg.
+const LOGO_PNG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/logo.png"));
+/// Margin kept around the wordmark when it is cut out of the icon, in icon pixels.
+const LOGO_MARGIN: u32 = 8;
 /// How different from the icon's background a pixel must be (summed over R, G, B)
 /// to count as fully part of the wordmark; less than that fades out.
 const LOGO_KEY_RANGE: i32 = 48;
 const LOGO_HEIGHT: f32 = 28.0;
+/// How many macros deep scripts may press other macros (Command.Button[i].State).
+const MAX_MACRO_DEPTH: usize = 4;
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 /// How often the engine's counters are checked for the log, and how often they
 /// are logged even when nothing changed.
@@ -44,6 +50,20 @@ const STATS_HEARTBEAT: Duration = Duration::from_secs(600);
 /// while a device keeps failing (e.g. held in exclusive mode by another app).
 const RESTART_CHECK_MIN: Duration = Duration::from_secs(2);
 const RESTART_CHECK_MAX: Duration = Duration::from_secs(30);
+
+/// What outlives a window: the audio engine and the settings. If the GPU is lost
+/// (a KVM switch or unplugged monitors can do that) egui can't carry on drawing
+/// and panics; the window is then reopened with these, so audio never stops.
+struct Carried {
+    backend: Box<dyn AudioBackend>,
+    config: Config,
+}
+
+type CarrySlot = std::rc::Rc<std::cell::RefCell<Option<Carried>>>;
+
+/// How long to wait before reopening the window after the GPU was lost, giving
+/// the display a moment to come back.
+const REOPEN_DELAY: Duration = Duration::from_secs(2);
 
 pub fn run(backend: Box<dyn AudioBackend>, config_path: PathBuf) -> anyhow::Result<()> {
     let mut config = config::load(&config_path);
@@ -56,18 +76,50 @@ pub fn run(backend: Box<dyn AudioBackend>, config_path: PathBuf) -> anyhow::Resu
             Err(e) => log::warn!("startup preset not loaded: {e:#}"),
         }
     }
+    #[cfg(target_os = "linux")]
+    crate::desktop_entry::install(ICON_PNG);
+
+    let slot: CarrySlot = std::rc::Rc::new(std::cell::RefCell::new(Some(Carried { backend, config })));
+    let mut reopening = false;
+    loop {
+        let window = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_window(&slot, &config_path, reopening)));
+        match window {
+            Ok(result) => return result,
+            Err(panic) if gpu_lost() && slot.borrow().is_some() => {
+                drop(panic);
+                log::warn!("reopening the window after the GPU was lost (audio kept running)");
+                std::thread::sleep(REOPEN_DELAY);
+                reopening = true;
+            }
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+}
+
+/// Whether the GPU was lost since the last call.
+fn gpu_lost() -> bool {
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    return gpu::take_lost();
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    return false;
+}
+
+/// Open the window and run it until it closes. `reopening` after a lost GPU, when
+/// the window shows straight away whatever the startup settings say.
+fn run_window(slot: &CarrySlot, config_path: &std::path::Path, reopening: bool) -> anyhow::Result<()> {
+    let Some(Carried { backend, config }) = slot.borrow_mut().take() else {
+        anyhow::bail!("the audio engine was lost with the window");
+    };
     let size = design_size(&config.mixer);
     // The app ID ties the window to its desktop entry, which is where docks get the icon.
     let mut viewport = egui::ViewportBuilder::default().with_title("OpenMeeter").with_app_id("openmeeter");
-    #[cfg(target_os = "linux")]
-    crate::desktop_entry::install(ICON_PNG);
     if config.settings.always_on_top {
         viewport = viewport.with_always_on_top();
     }
     let use_x11 = prefer_x11(config.settings.tray);
     let can_hide = can_hide_window(use_x11);
     // Starting hidden only makes sense with a tray icon to bring the window back.
-    let start_in_tray = !config.settings.show_on_startup && config.settings.tray && can_hide;
+    let start_in_tray = !reopening && !config.settings.show_on_startup && config.settings.tray && can_hide;
     if start_in_tray {
         viewport = viewport.with_visible(false);
     }
@@ -94,16 +146,104 @@ pub fn run(backend: Box<dyn AudioBackend>, config_path: PathBuf) -> anyhow::Resu
     {
         options.renderer = eframe::Renderer::Glow;
     }
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    {
+        options.wgpu_options.on_surface_status = Arc::new(gpu::surface_status);
+    }
+    // On Windows, draw with Direct3D 12 rather than Vulkan: Windows' own graphics
+    // stack copes with displays coming and going (a KVM switch), where Vulkan
+    // drivers can lose the device. WGPU_BACKEND still overrides this.
+    #[cfg(windows)]
+    if std::env::var_os("WGPU_BACKEND").is_none()
+        && let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup
+    {
+        setup.instance_descriptor.backends = eframe::wgpu::Backends::DX12;
+    }
     eframe::run_native(
         "OpenMeeter",
         options,
         Box::new(|cc| {
+            #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+            if let Some(render) = &cc.wgpu_render_state {
+                let info = render.adapter.get_info();
+                log::info!("drawing with {:?} on {}", info.backend, info.name);
+                gpu::survive_errors(&render.device);
+            }
             theme::apply(&cc.egui_ctx, config.settings.theme);
-            let logo = load_logo(&cc.egui_ctx);
-            Ok(Box::new(App::new(&cc.egui_ctx, backend, config, config_path, logo, can_hide)))
+            let logo = Logo::load();
+            let mut app = App::new(&cc.egui_ctx, backend, config, config_path.to_path_buf(), logo, can_hide, reopening);
+            app.carry = Some(slot.clone());
+            Ok(Box::new(app))
         }),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Keeping the window alive when the display changes under it.
+///
+/// A KVM switch or an unplugged monitor can leave the window's GPU surface
+/// invalid, or lose the GPU device altogether. wgpu's default response to errors
+/// is to panic, which would take the audio engine down with the process. Instead
+/// the surface is rebuilt, GPU errors are logged (at most every few seconds, since
+/// they repeat every frame while the display is away), and a lost device is
+/// flagged so `run` reopens the window once egui gives up on it.
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+mod gpu {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    use eframe::egui_wgpu::SurfaceErrorAction;
+    use eframe::wgpu;
+
+    const QUIET: Duration = Duration::from_secs(10);
+
+    /// Whether enough time has passed since `last` to log again.
+    fn due(last: &Mutex<Option<Instant>>) -> bool {
+        let Ok(mut last) = last.lock() else { return true };
+        let due = last.is_none_or(|t| t.elapsed() >= QUIET);
+        if due {
+            *last = Some(Instant::now());
+        }
+        due
+    }
+
+    pub fn surface_status(status: &wgpu::CurrentSurfaceTexture) -> SurfaceErrorAction {
+        static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+        match status {
+            wgpu::CurrentSurfaceTexture::Outdated => SurfaceErrorAction::Reconfigure,
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Validation => {
+                if due(&LAST) {
+                    log::warn!("window surface {status:?} (display changed?); rebuilding it");
+                }
+                SurfaceErrorAction::RecreateSurface
+            }
+            _ => SurfaceErrorAction::SkipFrame,
+        }
+    }
+
+    static LOST: AtomicBool = AtomicBool::new(false);
+
+    /// Whether the GPU device was lost since the last call.
+    pub fn take_lost() -> bool {
+        LOST.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn survive_errors(device: &wgpu::Device) {
+        static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+        device.on_uncaptured_error(std::sync::Arc::new(|error| {
+            if due(&LAST) {
+                log::error!("GPU error (audio keeps running): {error}");
+            }
+        }));
+        device.set_device_lost_callback(|reason, message| {
+            // Dropping the device at exit reports it lost too; that's not a failure.
+            if reason != wgpu::DeviceLostReason::Destroyed {
+                log::error!("GPU device lost ({reason:?}): {message}; the window will be reopened, audio keeps running");
+                LOST.store(true, Ordering::Relaxed);
+            }
+        });
+    }
 }
 
 /// Wayland doesn't let apps hide their windows, so with the tray on (where
@@ -119,15 +259,56 @@ fn can_hide_window(use_x11: bool) -> bool {
     use_x11 || !wayland
 }
 
-/// The wordmark cropped out of the app icon, as a texture for the title row.
-fn load_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
-    let icon = eframe::icon_data::from_png_bytes(ICON_PNG).ok()?;
-    let mut rgba = icon.rgba;
-    key_out_background(&mut rgba);
-    let full = egui::ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &rgba);
-    let (pos, size) = LOGO_CROP;
-    let logo = full.region_by_pixels(pos, size);
-    Some(ctx.load_texture("logo", logo, egui::TextureOptions::LINEAR))
+/// The wordmark, cut out of its artwork, for the title row.
+///
+/// The crop is some 960 pixels wide and drawn about 64 wide. Left to the GPU's
+/// linear filter that skips most of the source and looks ragged, so the texture
+/// is resampled properly to the exact size on screen, again whenever that changes.
+struct Logo {
+    full: image::RgbaImage,
+    /// The texture and the pixel height it was made for.
+    scaled: Option<(u32, egui::TextureHandle)>,
+}
+
+impl Logo {
+    fn load() -> Option<Self> {
+        let art = eframe::icon_data::from_png_bytes(LOGO_PNG).ok()?;
+        let mut rgba = art.rgba;
+        key_out_background(&mut rgba);
+        let art = image::RgbaImage::from_raw(art.width, art.height, rgba)?;
+        let (x, y, w, h) = content_bounds(&art)?;
+        let full = image::imageops::crop_imm(&art, x, y, w, h).to_image();
+        Some(Self { full, scaled: None })
+    }
+
+    /// The texture for a logo `points` high, and its size in points. One texture
+    /// pixel per screen pixel, so nothing is filtered when it's drawn.
+    fn texture(&mut self, ctx: &egui::Context, points: f32) -> (egui::TextureId, egui::Vec2) {
+        let scale = ctx.pixels_per_point();
+        let height = ((points * scale).round() as u32).max(1);
+        let width = ((height as f32 * self.full.width() as f32 / self.full.height() as f32).round() as u32).max(1);
+        if self.scaled.as_ref().is_none_or(|(made_for, _)| *made_for != height) {
+            let small = image::imageops::resize(&self.full, width, height, image::imageops::FilterType::Lanczos3);
+            let image = egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], small.as_raw());
+            self.scaled = Some((height, ctx.load_texture("logo", image, egui::TextureOptions::LINEAR)));
+        }
+        let (_, texture) = self.scaled.as_ref().expect("made above");
+        (texture.id(), vec2(width as f32, height as f32) / scale)
+    }
+}
+
+/// Where the artwork is in an image whose background is transparent: the box
+/// `(x, y, width, height)` around every mostly-opaque pixel, plus a small margin.
+/// `None` if there is nothing in it.
+fn content_bounds(image: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
+    let solid = image.enumerate_pixels().filter(|(_, _, pixel)| pixel[3] > 127);
+    let (left, top, right, bottom) = solid.fold(None, |bounds: Option<(u32, u32, u32, u32)>, (x, y, _)| match bounds {
+        None => Some((x, y, x, y)),
+        Some((l, t, r, b)) => Some((l.min(x), t.min(y), r.max(x), b.max(y))),
+    })?;
+    let (left, top) = (left.saturating_sub(LOGO_MARGIN), top.saturating_sub(LOGO_MARGIN));
+    let (right, bottom) = ((right + LOGO_MARGIN).min(image.width() - 1), (bottom + LOGO_MARGIN).min(image.height() - 1));
+    Some((left, top, right - left + 1, bottom - top + 1))
 }
 
 /// If the icon has a solid background (its top-left pixel is opaque), make that
@@ -152,6 +333,27 @@ fn strips_width(mixer: &Mixer) -> f32 {
     mixer.strips.iter().map(|s| if s.kind == Kind::Hardware { HW_STRIP_W } else { VIRT_STRIP_W }).sum()
 }
 
+/// A fader moving on its own, started by a script.
+struct Fade {
+    /// Strip or bus key.
+    key: String,
+    from: f32,
+    to: f32,
+    start: Instant,
+    duration: Duration,
+}
+
+/// Where macro scripts live: a `scripts` folder beside the settings file.
+fn scripts_folder(config_path: &std::path::Path) -> PathBuf {
+    config_path.parent().unwrap_or(std::path::Path::new(".")).join("scripts")
+}
+
+fn show_window(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+}
+
 struct App {
     backend: Box<dyn AudioBackend>,
     config: Config,
@@ -161,13 +363,18 @@ struct App {
     status: Option<String>,
     unsaved_since: Option<Instant>,
     meters: ballistics::Ballistics,
-    logo: Option<egui::TextureHandle>,
+    logo: Option<Logo>,
     recorder: Recorder,
     tray: Option<tray::Tray>,
     windows: menu::Windows,
     macros_ui: macros::State,
     /// Global hotkeys for the macro buttons, or why they're unavailable.
     hotkeys: Result<crate::macros::Hotkeys, String>,
+    /// Lua macro scripts, or why Lua couldn't start.
+    scripts: Result<crate::script::Engine, String>,
+    scripts_ui: scripts::State,
+    /// Faders that scripts are moving (FadeTo / FadeBy).
+    fades: Vec<Fade>,
     /// Set by Shut Down so closing the window really quits even with the tray on.
     quitting: bool,
     /// Cached "run on startup" state (read from the system, which owns it).
@@ -180,6 +387,9 @@ struct App {
     restart_backoff: Duration,
     /// False on native Wayland, where closing can't hide to the tray and just quits.
     can_hide: bool,
+    /// Where the engine and settings go when the window closes, so a window
+    /// lost with the GPU can be reopened without stopping the audio.
+    carry: Option<CarrySlot>,
 }
 
 impl App {
@@ -188,9 +398,11 @@ impl App {
         backend: Box<dyn AudioBackend>,
         config: Config,
         config_path: PathBuf,
-        logo: Option<egui::TextureHandle>,
+        logo: Option<Logo>,
         can_hide: bool,
+        reopening: bool,
     ) -> Self {
+        let scripts_dir = scripts_folder(&config_path);
         let mut app = Self {
             backend,
             config,
@@ -209,6 +421,9 @@ impl App {
                 let ctx = ctx.clone();
                 crate::macros::Hotkeys::new(move || ctx.request_repaint())
             },
+            scripts: crate::script::Engine::new(scripts_dir),
+            scripts_ui: scripts::State::default(),
+            fades: Vec::new(),
             quitting: false,
             run_on_startup: crate::autostart::is_enabled(),
             next_restart_check: Instant::now() + RESTART_CHECK_MIN,
@@ -217,16 +432,18 @@ impl App {
             last_stats_log: Instant::now(),
             restart_backoff: RESTART_CHECK_MIN,
             can_hide,
+            carry: None,
         };
         app.recorder = Recorder::new(app.backend.player());
         app.set_tray(ctx, app.config.settings.tray);
-        if !app.config.settings.show_on_startup && app.tray.is_none() {
+        if !reopening && !app.config.settings.show_on_startup && app.tray.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         }
         app.backend.set_buffer_ms(app.config.settings.buffer_ms);
         app.refresh_devices();
         app.migrate_virtual_bindings();
         app.apply();
+        if std::env::var("OM_SHOT").is_ok() { let f = scripts_folder(&app.config_path); app.scripts_ui.show(&f, Some("mic-to-b1")); } // TEMP-SHOT
         app
     }
 
@@ -306,12 +523,15 @@ impl App {
     /// Logo, status line and Menu button.
     fn title_bar(&mut self, ui: &mut Ui, o: Pos2, width: f32) {
         let p = ui.painter().clone();
-        match &self.logo {
+        match &mut self.logo {
             Some(logo) => {
-                let [w, h] = logo.size();
-                let size = vec2(LOGO_HEIGHT * w as f32 / h as f32, LOGO_HEIGHT);
-                let rect = egui::Rect::from_min_size(o + vec2(10.0, 17.5 - LOGO_HEIGHT / 2.0), size);
-                p.image(logo.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                let (texture, size) = logo.texture(ui.ctx(), LOGO_HEIGHT);
+                // On whole pixels, so the texture's pixels land exactly on the screen's.
+                let scale = ui.ctx().pixels_per_point();
+                let corner = o + vec2(10.0, 17.5 - LOGO_HEIGHT / 2.0);
+                let corner = egui::pos2((corner.x * scale).round(), (corner.y * scale).round()) / scale;
+                let rect = egui::Rect::from_min_size(corner, size);
+                p.image(texture, rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
             }
             None => {
                 text(&p, o + vec2(10.0, 17.5), Align2::LEFT_CENTER, "OPENMEETER", 14.0, theme::colors().text);
@@ -355,15 +575,7 @@ impl App {
             A::EjectCassette => self.recorder.eject(),
             A::LoadSettings => {
                 if let Some(path) = settings_dialog().set_title("Load Settings").pick_file() {
-                    match config::load_preset(&path) {
-                        Ok(preset) => {
-                            self.config.mixer = preset.mixer;
-                            settings.theme = preset.theme;
-                            theme::apply(ctx, preset.theme);
-                            self.status = Some(format!("Loaded {}", path.display()));
-                        }
-                        Err(e) => self.status = Some(format!("{e:#}")),
-                    }
+                    self.load_settings(ctx, &path);
                 }
             }
             A::ChooseStartupPreset => {
@@ -402,6 +614,7 @@ impl App {
             A::OpenSystemSettings => self.windows.system_settings = true,
             A::OpenRecorderOptions => self.windows.recorder_options = true,
             A::OpenMacros => self.macros_ui.open = true,
+            A::OpenScripts => self.scripts_ui.show(&scripts_folder(&self.config_path), None),
             A::OpenLayout => self.windows.layout = true,
             A::RefreshDevices => self.refresh_devices(),
             A::ShutDown => {
@@ -410,6 +623,19 @@ impl App {
             }
         }
         self.unsaved_since.get_or_insert_with(Instant::now);
+    }
+
+    /// Replace the mixer and theme with a saved settings file.
+    fn load_settings(&mut self, ctx: &egui::Context, path: &std::path::Path) {
+        match config::load_preset(path) {
+            Ok(preset) => {
+                self.config.mixer = preset.mixer;
+                self.config.settings.theme = preset.theme;
+                theme::apply(ctx, preset.theme);
+                self.status = Some(format!("Loaded {}", path.display()));
+            }
+            Err(e) => self.status = Some(format!("{e:#}")),
+        }
     }
 
     fn set_tray(&mut self, ctx: &egui::Context, on: bool) {
@@ -500,11 +726,7 @@ impl App {
         let commands = self.tray.as_ref().map(tray::Tray::poll).unwrap_or_default();
         for command in commands {
             match command {
-                tray::TrayCommand::Show => {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                }
+                tray::TrayCommand::Show => show_window(ctx),
                 tray::TrayCommand::Quit => {
                     self.quitting = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -537,15 +759,39 @@ impl App {
         if let Some(action) = recorder_options::window(ctx, &mut self.windows.recorder_options, recorder, &inputs, &buses) {
             self.handle_recorder(action);
         }
-        let targets = macro_targets(&self.config.mixer);
+        let (strips, buses) = macro_targets(&self.config.mixer);
         let no_errors = HashMap::new();
+        let folder = scripts_folder(&self.config_path);
+        let script_names = if self.macros_ui.open { crate::script::list(&folder) } else { Vec::new() };
         let info = macros::Info {
-            targets: &targets,
+            strips: &strips,
+            buses: &buses,
+            scripts: &script_names,
             errors: self.hotkeys.as_ref().map_or(&no_errors, |h| &h.errors),
             unavailable: self.hotkeys.as_ref().err().map(String::as_str),
         };
-        if let Some(i) = macros::window(ctx, &mut self.macros_ui, &mut self.config.settings.macros, &info) {
-            self.run_macro(i);
+        match macros::window(ctx, &mut self.macros_ui, &mut self.config.settings.macros, &info) {
+            Some(macros::Request::Run(i)) => self.run_macro(ctx, i, 0),
+            Some(macros::Request::EditScript(name)) => self.scripts_ui.show(&folder, name.as_deref()),
+            None => {}
+        }
+        let no_output = std::collections::VecDeque::new();
+        let output = self.scripts.as_ref().map_or(&no_output, |e| &e.output);
+        let buttons: Vec<String> = self.config.settings.macros.iter().map(|m| m.name.clone()).collect();
+        match scripts::window(ctx, &mut self.scripts_ui, &folder, output, &self.config.mixer, &buttons) {
+            Some(scripts::Action::Run(name)) => self.run_script(ctx, &name, None, 0),
+            Some(scripts::Action::OpenFolder) => {
+                let opened = std::fs::create_dir_all(&folder).and_then(|()| open_in_file_manager(&folder));
+                if let Err(e) = opened {
+                    self.status = Some(format!("Couldn't open {}: {e}", folder.display()));
+                }
+            }
+            Some(scripts::Action::ClearOutput) => {
+                if let Ok(engine) = &mut self.scripts {
+                    engine.output.clear();
+                }
+            }
+            None => {}
         }
         if let Some(layout) = menu::layout_window(ctx, &mut self.windows.layout, self.config.mixer.layout()) {
             // Keep the current scale: resize the window to the new layout's size.
@@ -568,37 +814,156 @@ impl App {
     }
 
     /// Register changed hotkeys and run the macros whose hotkeys were pressed.
-    fn poll_hotkeys(&mut self) {
+    fn poll_hotkeys(&mut self, ctx: &egui::Context) {
         let Ok(hotkeys) = &mut self.hotkeys else { return };
         hotkeys.sync(&self.config.settings.macros, self.macros_ui.capturing.is_some());
         for i in hotkeys.fired() {
-            self.run_macro(i);
+            self.run_macro(ctx, i, 0);
         }
     }
 
-    fn run_macro(&mut self, i: usize) {
+    /// Run macro `i`. `depth` counts macros started by scripts (Command.Button),
+    /// so macros that press each other can't loop forever.
+    fn run_macro(&mut self, ctx: &egui::Context, i: usize, depth: usize) {
         use crate::macros::MacroAction as M;
         let Some(m) = self.config.settings.macros.get(i) else { return };
         log::info!("macro: {}", m.name);
-        match m.action.clone() {
+        let (name, action) = (m.name.clone(), m.action.clone());
+        match action {
             M::RestartEngine => self.restart_engine(),
-            M::PlayClip { path: Some(path) } => self.recorder.play_file(path),
-            M::PlayClip { path: None } => self.status = Some(format!("Macro \"{}\" has no sound clip chosen", m.name)),
-            M::StopPlayback => self.recorder.stop_playback(),
-            M::ToggleRecording => {
-                let labels = self.config.mixer.node_labels();
-                self.recorder.toggle_record(&mut *self.backend, &self.config.mixer.recorder, &labels);
+            M::ShowHideWindow => {
+                let front = ctx.input(|i| i.viewport().focused.unwrap_or(false) && !i.viewport().minimized.unwrap_or(false));
+                if front { self.hide_window(ctx) } else { show_window(ctx) }
             }
-            M::ToggleMute { key } => {
-                let mixer = &mut self.config.mixer;
-                let mute = mixer.strips.iter_mut().find(|s| s.key == key).map(|s| &mut s.mute);
-                let mute = mute.or_else(|| mixer.buses.iter_mut().find(|b| b.key == key).map(|b| &mut b.mute));
-                if let Some(mute) = mute {
-                    *mute = !*mute;
+            M::LoadSettings { path: Some(path) } => self.load_settings(ctx, &path),
+            M::RunScript { name: script } if !script.is_empty() => self.run_script(ctx, &script, None, depth),
+            M::PlayPause => self.handle_recorder(RecorderAction::PlayPause),
+            M::Stop => self.handle_recorder(RecorderAction::Stop),
+            M::StopPlayback => self.recorder.stop_playback(),
+            M::Rewind => self.handle_recorder(RecorderAction::Rewind),
+            M::FastForward => self.handle_recorder(RecorderAction::Forward),
+            M::ToggleRecording => self.handle_recorder(RecorderAction::Record),
+            M::PlayClip { path: Some(path) } => self.recorder.play_file(path),
+            M::PlayClip { path: None } | M::LoadSettings { path: None } => self.status = Some(format!("Macro \"{name}\" has no file chosen")),
+            M::RunScript { .. } => self.status = Some(format!("Macro \"{name}\" has no script chosen")),
+            M::Eject => self.recorder.eject(),
+            mixer_action => match mixer_action.apply_to(&mut self.config.mixer) {
+                Ok(_) => {
                     self.apply();
                     self.unsaved_since.get_or_insert_with(Instant::now);
                 }
+                Err(e) => self.status = Some(format!("Macro \"{name}\": {e}")),
+            },
+        }
+    }
+
+    /// Run a Lua script: the file `name` from the scripts folder, or `code` if given.
+    fn run_script(&mut self, ctx: &egui::Context, name: &str, code: Option<&str>, depth: usize) {
+        let Ok(engine) = &mut self.scripts else {
+            self.status = self.scripts.as_ref().err().cloned();
+            return;
+        };
+        let host = Host::new(self.config.mixer.clone(), self.config.settings.lock_ui, self.recorder.state(), self.config.settings.macros.len());
+        let (host, result) = match code {
+            Some(code) => engine.run(name, code, host),
+            None => engine.run_file(name, host),
+        };
+        // Whatever the script did before an error stands, as in Voicemeeter.
+        if host.mixer != self.config.mixer {
+            self.config.mixer = host.mixer;
+            self.apply();
+            self.unsaved_since.get_or_insert_with(Instant::now);
+        }
+        if host.locked != self.config.settings.lock_ui {
+            self.config.settings.lock_ui = host.locked;
+            self.unsaved_since.get_or_insert_with(Instant::now);
+        }
+        for command in host.commands {
+            self.script_command(ctx, command, depth);
+        }
+        if let Err(e) = result {
+            self.status = Some(format!("Script {name}: {e}"));
+        }
+    }
+
+    fn script_command(&mut self, ctx: &egui::Context, command: Command, depth: usize) {
+        match command {
+            Command::Restart => self.restart_engine(),
+            Command::Shutdown => {
+                self.quitting = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
+            Command::Show(true) => show_window(ctx),
+            Command::Show(false) => self.hide_window(ctx),
+            Command::Eject => self.recorder.eject(),
+            Command::Reset => {
+                self.config.mixer = Mixer::default();
+                self.apply();
+                self.unsaved_since.get_or_insert_with(Instant::now);
+            }
+            Command::Save(path) => {
+                self.status = Some(match config::save_preset(&self.config.mixer, self.config.settings.theme, &path) {
+                    Ok(()) => format!("Saved {}", path.display()),
+                    Err(e) => format!("{e:#}"),
+                });
+            }
+            Command::Load(path) => {
+                self.load_settings(ctx, &path);
+                self.apply();
+                self.unsaved_since.get_or_insert_with(Instant::now);
+            }
+            Command::PushButton(i) if depth < MAX_MACRO_DEPTH => self.run_macro(ctx, i, depth + 1),
+            Command::PushButton(_) => self.status = Some("Macros pressing each other went too deep; stopped".into()),
+            Command::Recorder(transport) => match transport {
+                Transport::Play => self.recorder.play(),
+                Transport::Pause => self.recorder.pause(),
+                Transport::Stop => self.handle_recorder(RecorderAction::Stop),
+                Transport::Replay => self.recorder.replay(),
+                Transport::FastForward => self.recorder.skip(true),
+                Transport::Rewind => self.recorder.skip(false),
+                Transport::Record if !self.recorder.is_recording() => self.handle_recorder(RecorderAction::Record),
+                Transport::Record => {}
+                Transport::StopRecording => self.recorder.stop_recording(&mut *self.backend),
+            },
+            Command::RecorderLoad(path) => self.recorder.load(path),
+            Command::Goto(seconds) => self.recorder.goto(seconds),
+            Command::Fade { key, from, to, ms } => {
+                self.fades.retain(|f| f.key != key);
+                self.fades.push(Fade { key, from, to, start: Instant::now(), duration: Duration::from_secs_f32(ms / 1000.0) });
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    /// Move faders that scripts are fading.
+    fn tick_fades(&mut self, ctx: &egui::Context) {
+        if self.fades.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        for fade in &self.fades {
+            let t = if fade.duration.is_zero() { 1.0 } else { ((now - fade.start).as_secs_f32() / fade.duration.as_secs_f32()).min(1.0) };
+            let gain = fade.from + (fade.to - fade.from) * t;
+            let mixer = &mut self.config.mixer;
+            let target = mixer.strips.iter_mut().find(|s| s.key == fade.key).map(|s| &mut s.gain_db);
+            if let Some(g) = target.or_else(|| mixer.buses.iter_mut().find(|b| b.key == fade.key).map(|b| &mut b.gain_db)) {
+                *g = gain;
+            }
+        }
+        self.fades.retain(|f| now < f.start + f.duration);
+        self.apply();
+        self.unsaved_since.get_or_insert_with(Instant::now);
+        if !self.fades.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(15));
+        }
+    }
+
+    /// Hide to the tray if there is one, else minimise.
+    fn hide_window(&self, ctx: &egui::Context) {
+        if self.tray.is_some() && self.can_hide {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         }
     }
 
@@ -812,9 +1177,14 @@ fn armables(mixer: &Mixer) -> (Vec<recorder_options::Armable>, Vec<recorder_opti
 }
 
 /// What a mute macro can target: every strip (by label) and bus (by key).
-fn macro_targets(mixer: &Mixer) -> Vec<(String, String)> {
-    let strips = mixer.strips.iter().map(|s| (s.key.clone(), s.label.clone()));
-    strips.chain(mixer.buses.iter().map(|b| (b.key.clone(), format!("Bus {}", b.key)))).collect()
+/// A strip or bus a macro can act on: (key, label).
+type Choice = (String, String);
+
+/// The strips and buses macros can act on.
+fn macro_targets(mixer: &Mixer) -> (Vec<Choice>, Vec<Choice>) {
+    let strips = mixer.strips.iter().map(|s| (s.key.clone(), s.label.clone())).collect();
+    let buses = mixer.buses.iter().map(|b| (b.key.clone(), format!("Bus {}", b.key))).collect();
+    (strips, buses)
 }
 
 fn settings_dialog() -> rfd::FileDialog {
@@ -845,7 +1215,8 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.tray_and_close(ctx);
         // Hotkeys and the clips they load must work while the window is hidden.
-        self.poll_hotkeys();
+        self.poll_hotkeys(ctx);
+        self.tick_fades(ctx);
         self.log_engine_stats();
         self.recorder.poll(&mut *self.backend, &self.config.mixer.recorder);
         if self.recorder.is_loading() {
@@ -883,6 +1254,18 @@ impl eframe::App for App {
     }
 }
 
+impl Drop for App {
+    /// Hand the engine and settings back for the next window. This also runs when
+    /// egui panics after a lost GPU, which skips `on_exit`.
+    fn drop(&mut self) {
+        let Some(slot) = self.carry.take() else { return };
+        self.recorder.stop_recording(&mut *self.backend);
+        self.save_if_due(true);
+        let backend = std::mem::replace(&mut self.backend, Box::new(openmeeter_backend::MockBackend::new()));
+        *slot.borrow_mut() = Some(Carried { backend, config: self.config.clone() });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -900,10 +1283,25 @@ mod tests {
     }
 
     #[test]
-    fn the_rendered_icon_holds_the_wordmark_crop() {
-        let icon = eframe::icon_data::from_png_bytes(ICON_PNG).expect("build.rs renders images/icon.svg to a PNG");
-        let (pos, size) = LOGO_CROP;
-        assert!(pos[0] + size[0] <= icon.width as usize && pos[1] + size[1] <= icon.height as usize, "LOGO_CROP lies inside the icon");
+    fn the_icon_and_the_wordmark_render_from_their_svgs() {
+        let icon = eframe::icon_data::from_png_bytes(ICON_PNG).expect("build.rs renders images/icon2.svg to a PNG");
+        assert_eq!(icon.width, icon.height, "the icon is square whatever the artwork's shape");
+        let logo = Logo::load().expect("images/icon.svg has a wordmark on a plain background");
+        let (w, h) = logo.full.dimensions();
+        assert!(w > h && h > 50, "a wide wordmark cut out of its background: {w}x{h}");
+    }
+
+    #[test]
+    fn content_bounds_box_the_solid_pixels() {
+        let mut image = image::RgbaImage::new(100, 60);
+        assert_eq!(content_bounds(&image), None);
+        for (x, y) in [(30, 20), (70, 40)] {
+            image.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
+        }
+        image.put_pixel(5, 5, image::Rgba([255, 255, 255, 40])); // a faint fringe doesn't count
+        assert_eq!(content_bounds(&image), Some((22, 12, 57, 37)));
+        image.put_pixel(99, 59, image::Rgba([0, 0, 0, 255]));
+        assert_eq!(content_bounds(&image), Some((22, 12, 78, 48)), "clamped to the image");
     }
 
     #[test]

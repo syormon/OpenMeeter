@@ -12,7 +12,8 @@ A Voicemeeter-style audio mixer for Windows and Linux. Windows requires `VB-Cabl
       run on startup, start hidden, always on top, lock UI, system settings (buffer size, strip names)
 - [x] Windows: per-output exclusive mode (bypasses the Windows mixer and effects, like Voicemeeter)
 - [x] Windows: outputs play in raw mode, bypassing device effects (Realtek "enhancements", virtual surround, loudness) without taking the device exclusively
-- [x] Macro buttons: global hotkeys (e.g. Ctrl+F12, Numpad7) to restart the engine, play a sound clip, stop playback, start/stop recording or toggle a mute (X11 only on Linux)
+- [x] Macro buttons: global hotkeys (e.g. Ctrl+F12, Numpad7) for the recorder transport (play/pause, stop, rewind, fast forward, record, play a sound clip, eject), strip and bus controls (mute, solo, mono, A1/B1... outputs, set or nudge a fader), loading a settings file, showing/hiding the window and restarting the engine (X11 only on Linux)
+- [x] Macro scripts in Lua 5.3, using Voicemeeter's Remote API parameter names (`Strip[0].Mute = 1`)
 - [x] Custom colour themes from the config file (see [Theming](#theming))
 - [x] Adjustable mixer layout: 1-8 hardware inputs, 0-4 virtual inputs, 1-5 hardware outputs, 0-3 virtual outputs (Menu > Mixer Layout; 3 / 2 / 3 / 2 by default)
 - [ ] MIDI mapping, VBAN
@@ -83,6 +84,31 @@ Every colour can be overridden from the config file like as so:
 their whole family in matching shades; `openmeeter theme` lists every colour that can be set.
 
 > **`Menu` > `Load Settings...`**
+
+## Macro scripts
+
+For anything the built-in macro actions don't cover, a macro can run a Lua 5.3
+script. Write scripts in **Menu > Macro Scripts (Lua)** (they're `.lua` files in a
+`scripts` folder beside the settings; `openmeeter config-path` shows where), then
+bind one to a hotkey with the **Run Script** action in **Menu > Macro Buttons**.
+
+Scripts use the parameter names of Voicemeeter's Remote API, so most Voicemeeter
+macro-button scripts carry over. Strips and buses count from 0: hardware inputs,
+then virtual inputs; A1, A2..., then B1, B2...
+
+```lua
+Strip[0].Mute = 1 - Strip[0].Mute        -- toggle the first input's mute
+Strip[0].B1 = 1                          -- send it to B1
+Bus[0].FadeTo = "(-10, 500)"             -- fade A1 to -10 dB over half a second
+Recorder.load = "C:/clips/airhorn.wav"
+Recorder.play = 1
+SetParameters("Strip[1].Gain += 3; Strip[1].A1 += 1")   -- Voicemeeter's own syntax
+```
+
+The full list is under **API reference** in the Macro Scripts window. Scripts can
+`require` other scripts in the folder, `print` to the window's output, and keep
+globals between runs. They can't touch files, programs or the network, and a run
+is stopped after 250 ms.
 
 ## Running locally
 

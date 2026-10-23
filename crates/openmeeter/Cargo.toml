@@ -9,11 +9,15 @@ chrono = "0.4.45"
 clap = { version = "4.6.7", features = ["derive"] }
 directories = "6.0.0"
 eframe = "0.36.2"
+# Lua syntax highlighting in the macro script editor.
+egui_extras = { version = "0.36.2", default-features = false, features = ["syntect"] }
 env_logger = "0.11.11"
 global-hotkey = "0.8"
 hound = "3.5.1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 log = "0.4.34"
+# Macro scripts. Lua is built from source (vendored), so no system Lua is needed.
+mlua = { version = "0.12.2", features = ["lua53", "vendored"] }
 openmeeter-backend = { version = "0.1.0", path = "../backend" }
 rfd = "0.17.2"
 rubato = "5.0.0"

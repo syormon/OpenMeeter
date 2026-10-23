@@ -11,6 +11,7 @@ mod logfile;
 mod macros;
 mod model;
 mod recorder;
+mod script;
 mod ui;
 
 use clap::{Parser, Subcommand};

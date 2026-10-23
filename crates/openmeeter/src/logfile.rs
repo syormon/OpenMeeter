@@ -22,6 +22,20 @@ pub fn init(file: Option<&Path>) {
         builder.target(env_logger::Target::Pipe(Box::new(Tee(file))));
     }
     builder.init();
+    log_panics();
+}
+
+/// Put panics in the log too: the Windows release build has no console, so
+/// otherwise a crash leaves no trace.
+fn log_panics() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        log::error!("panic on thread {}: {info}
+{backtrace}", thread.name().unwrap_or("unnamed"));
+        default(info);
+    }));
 }
 
 fn open(path: &Path) -> Option<File> {
